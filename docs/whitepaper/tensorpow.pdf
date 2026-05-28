@@ -1,0 +1,177 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+5 0 obj
+<< /Length 5115 >>
+stream
+BT
+/F1 8 Tf
+50 760 Td
+10 TL
+(# TensorPoW: A Tensor-Native Proof-of-Work Currency) Tj
+T*
+(Author: Arav Jain \(@aravhawk\)) Tj
+T*
+(Draft date: 2026-05-27) Tj
+T*
+(## Abstract) Tj
+T*
+(TensorPoW is a permissionless proof-of-work currency whose work function is) Tj
+T*
+(deterministic signed INT8 matrix multiplication with INT32 accumulation. The) Tj
+T*
+(chain separates high-rate transaction carriers, called fruits, from lower-rate) Tj
+T*
+(ordering checkpoints, called anchors. Fruits carry transactions under a) Tj
+T*
+(permanent work target. Anchors commit fruit sets, parent candidates, shard-tree) Tj
+T*
+(state, and fee-floor state under a WTEMA-adjusted target. The ledger is a pure) Tj
+T*
+(UTXO system: balances are derived only from unspent outputs, and genesis creates) Tj
+T*
+(no spendable allocation.) Tj
+T*
+(The design goal is to make useful parallel tensor hardware the natural mining) Tj
+T*
+(substrate while keeping consensus byte-exact across CUDA, MPS, x86 CPU, and ARM) Tj
+T*
+(CPU implementations. All consensus hashes use BLAKE3 with explicit domain) Tj
+T*
+(separation, all consensus integers are little-endian, and every consensus object) Tj
+T*
+(has a canonical byte encoding.) Tj
+T*
+(## 1. Introduction) Tj
+T*
+(Bitcoin demonstrated that an open network can order payments by making history) Tj
+T*
+(expensive to rewrite. TensorPoW keeps that central idea but changes the work) Tj
+T*
+(primitive and the block structure. Modern compute supply is increasingly shaped) Tj
+T*
+(by tensor accelerators. TensorPoW therefore uses a fixed 1024 by 1024 signed) Tj
+T*
+(INT8 matrix multiplication as its proof-of-work kernel. The output is serialized) Tj
+T*
+(as signed little-endian INT32 cells and hashed with BLAKE3.) Tj
+T*
+(TensorPoW is also a BlockDAG rather than a single-parent chain. Fruits can) Tj
+T*
+(reference multiple recent parents so honest work produced during propagation) Tj
+T*
+(races remains useful. Anchors periodically commit ordered fruit sets and the) Tj
+T*
+(state needed by wallets, miners, and light clients. The currency unit is TSC;) Tj
+T*
+(the atomic subunit is the matom, with 100,000,000 matoms per TSC.) Tj
+T*
+(This paper describes the permanent protocol semantics. It does not introduce a) Tj
+T*
+(numbered-generation network. Future incompatible rule changes require planned) Tj
+T*
+(hardforks of the same chain.) Tj
+T*
+(## 2. System Model) Tj
+T*
+(Nodes communicate over libp2p using TCP and QUIC transports, Noise security,) Tj
+T*
+(yamux multiplexing, Kademlia peer discovery, and Gossipsub 2.0 topic gossip.) Tj
+T*
+(The protocol defines gossip topics for fruits, anchors, and shard transactions.) Tj
+T*
+(Every wire message begins with the TensorPoW wire magic, a typed payload length,) Tj
+T*
+(the canonical payload, and a short BLAKE3-derived checksum. A malformed network) Tj
+T*
+(message is dropped before its payload can affect consensus.) Tj
+T*
+(The ledger is a pure UTXO ledger. There are no accounts, account nonces, smart) Tj
+T*
+(contract storage slots, or shared mutable balances. A transaction consumes) Tj
+T*
+(existing outpoints and creates new outputs. A transaction is valid only when the) Tj
+T*
+(referenced outputs exist, are unspent, satisfy their script templates, and obey) Tj
+T*
+(the active shard fee floor.) Tj
+T*
+(The network assumes asynchronous propagation and adversarial peers. It does not) Tj
+T*
+(enforce a consensus bandwidth minimum. Public routing is expected to work best) Tj
+T*
+(for operators that provision at least the recommended 10 MB/s bandwidth.) Tj
+T*
+(## 3. Cryptographic Commitments) Tj
+T*
+(Every consensus hash is BLAKE3 with a 32-byte output unless the protocol) Tj
+T*
+(explicitly calls for BLAKE3 XOF. Hash preimages begin with a one-byte domain) Tj
+T*
+(constant followed by canonical bytes. Domain separation is used for PoW) Tj
+T*
+(challenges, PoW outputs, fruit headers, anchor headers, transaction IDs,) Tj
+T*
+(signature hashes, outpoints, UTXO values, Merkle nodes, addresses, genesis,) Tj
+T*
+(shard trees, fee floors, and data-availability samples.) Tj
+T*
+(Ed25519 is the only active signature type at genesis. Transaction inputs carry a) Tj
+T*
+(signature type, and verifiers dispatch through a fixed signature table. Unknown) Tj
+T*
+(signature types fail validation. The reserved post-quantum signature identifier) Tj
+T*
+(does not validate until a hardfork activates rules for it.) Tj
+T*
+(Tensorcoin addresses are lowercase Bech32m strings with the human-readable part) Tj
+T*
+(`tsc`. The payload is `BLAKE3\(DOMAIN_ADDRESS || ed25519_public_key\)`, converted) Tj
+T*
+(from 8-bit bytes to 5-bit Bech32m words. Mixed case, wrong HRP, invalid) Tj
+T*
+(checksums, invalid padding, and wrong decoded payload lengths are invalid.) Tj
+T*
+(## 4. Tensor Proof of Work) Tj
+T*
+(The PoW kernel is:) Tj
+T*
+(```text) Tj
+T*
+(C[row, col] = sum\(A[row, k] * B[k, col]\) for k in [0, 1024\)) Tj
+T*
+(```) Tj
+T*
+(`A` and `B` are signed INT8 matrices. `C` is a signed INT32 matrix. The) Tj
+T*
+(accumulator must not wrap, and floating-point promotion is not a valid) Tj
+T*
+(consensus implementation. Canonical output bytes serialize every INT32 cell in) Tj
+T*
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000000315 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+5481
+%%EOF

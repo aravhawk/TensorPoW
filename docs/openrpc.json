@@ -1,0 +1,195 @@
+{
+  "openrpc": "1.4.0",
+  "info": {
+    "title": "TensorPoW JSON-RPC API",
+    "version": "0.1.0",
+    "description": "HTTP and WebSocket JSON-RPC interface for TensorPoW nodes."
+  },
+  "servers": [
+    {
+      "name": "local-http",
+      "url": "http://127.0.0.1:28332/rpc"
+    },
+    {
+      "name": "local-websocket",
+      "url": "ws://127.0.0.1:28332/ws"
+    }
+  ],
+  "methods": [
+    {
+      "name": "getblock",
+      "description": "Return canonical block bytes by hash.",
+      "params": [
+        {
+          "name": "block_hash",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]*$",
+            "minLength": 64,
+            "maxLength": 64
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "gettx",
+      "description": "Return a transaction by id when known locally.",
+      "params": [
+        {
+          "name": "txid",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]*$",
+            "minLength": 64,
+            "maxLength": 64
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "sendrawtx",
+      "description": "Validate and relay a canonical transaction.",
+      "params": [
+        {
+          "name": "rawtx",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]*$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "getbalance",
+      "description": "Return spendable balance for an address.",
+      "params": [
+        {
+          "name": "address",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "getutxos",
+      "description": "Return spendable UTXOs for an address.",
+      "params": [
+        {
+          "name": "address",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "getmempool",
+      "description": "Return local mempool entries, optionally filtered by shard.",
+      "params": [
+        {
+          "name": "shard_id",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "getshardtree",
+      "description": "Return the current shard tree commitment and leaves.",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "getfinality",
+      "description": "Return local finality status for a block hash.",
+      "params": [
+        {
+          "name": "block_hash",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]*$",
+            "minLength": 64,
+            "maxLength": 64
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "subscribe",
+      "description": "Create a local topic subscription and return an event-drain endpoint.",
+      "params": [
+        {
+          "name": "topic",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      }
+    }
+  ]
+}
