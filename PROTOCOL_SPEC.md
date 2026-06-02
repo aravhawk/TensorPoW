@@ -542,8 +542,11 @@ tx_id = BLAKE3(DOMAIN_TX_ID || canonical_tx_bytes)
 Signature hash:
 
 ```text
-sighash = BLAKE3(DOMAIN_TX_SIGHASH || canonical_tx_bytes_with_empty_witnesses || input_index_le)
+sighash = BLAKE3(DOMAIN_TX_SIGHASH || canonical_tx_bytes_with_empty_witnesses || input_index_u32_le)
 ```
+
+`input_index_u32_le` is exactly `U32_BYTES` little-endian bytes. Implementations MUST NOT encode the
+signature-hash input index as `uint16`, even though `input_count` is a `uint16`.
 
 Transaction byte layout:
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from tensorpow.crypto.hash import DOMAIN_TX_SIGHASH, domain_hash
 from tensorpow.crypto.signatures import SIG_TYPE_ML_DSA_RESERVED
 from tensorpow.state.utxo import TEMPLATE_HASHLOCK, TEMPLATE_MULTISIG, TEMPLATE_PKH, Outpoint
 from tensorpow.tx.transaction import (
@@ -103,6 +104,33 @@ def test_sighash_uses_empty_witnesses_and_checks_index() -> None:
     assert tx.without_witnesses().inputs[0].witness == b""
     with pytest.raises(IndexError):
         tx.sighash(1)
+
+
+def test_sighash_input_index_is_uint32_le() -> None:
+    tx = Transaction(
+        version=FORMAT_EPOCH,
+        sig_type=0,
+        locktime_ms=1,
+        lockheight=2,
+        inputs=(
+            _input(),
+            Input(
+                previous_outpoint=Outpoint(bytes([1]) * 32, 1),
+                witness=b"\x03\x04",
+            ),
+        ),
+        outputs=(_output(),),
+    )
+
+    empty_witness_bytes = tx.without_witnesses().to_bytes()
+    assert tx.sighash(1) == domain_hash(
+        DOMAIN_TX_SIGHASH,
+        empty_witness_bytes + (1).to_bytes(4, "little"),
+    )
+    assert tx.sighash(1) != domain_hash(
+        DOMAIN_TX_SIGHASH,
+        empty_witness_bytes + (1).to_bytes(2, "little"),
+    )
 
 
 def test_transaction_rejects_malformed_truncated_and_noncanonical_bytes() -> None:
