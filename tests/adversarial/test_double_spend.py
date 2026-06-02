@@ -16,27 +16,55 @@ from tensorpow.chain.blocks import (
 )
 from tensorpow.chain.headers import AnchorHeader, FruitHeader
 from tensorpow.consensus.ghostdag import BlockDAG, topological_order
+from tensorpow.crypto.hash import hash_bytes
 from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
 from tensorpow.mempool import ROOT_SHARD_ID, ShardTree
 from tensorpow.node import TensorPowConfig, TensorPowNode
-from tensorpow.pow.challenge import FORMAT_EPOCH, GENESIS_PARENT_HASH
-from tensorpow.state.utxo import Outpoint
-from tests.adversarial._helpers import coinbase_tx, fruit, genesis_anchor, h, signed_tx, utxo
+from tensorpow.pow.challenge import FORMAT_EPOCH
+from tensorpow.state.utxo import TEMPLATE_PKH, UTXO, Outpoint
+from tensorpow.tx.transaction import Output
+from tests.adversarial._helpers import (
+    OWNER_PUBKEY_HASH,
+    coinbase_tx,
+    fruit,
+    genesis_anchor,
+    h,
+    signed_tx,
+)
 
 
 def test_dag_order_allows_only_one_conflicting_spend(tmp_path: Path) -> None:
-    funded = utxo(100, amount=1_000)
+    genesis = genesis_anchor()
+    funding_fruit = fruit(
+        (coinbase_tx(0).to_bytes(),),
+        latest_anchor=genesis.block_hash(),
+        nonce=10,
+        timestamp_ms=1,
+    )
+    funding_output = Output(1_000, TEMPLATE_PKH, payload=OWNER_PUBKEY_HASH)
+    funding_anchor = _anchor_for_fruits(
+        funding_fruit,
+        parent_anchor=genesis.block_hash(),
+        anchor_reward_outputs=(funding_output,),
+    )
+    funded = UTXO(
+        outpoint=Outpoint(hash_bytes(b"anchorreward:" + funding_anchor.block_hash()), 0),
+        amount_matoms=funding_output.amount_matoms,
+        template_id=TEMPLATE_PKH,
+        owner_pubkey_hash=OWNER_PUBKEY_HASH,
+        payload=OWNER_PUBKEY_HASH,
+    )
     left_spend = signed_tx(funded, fee=100, recipient_pubkey_hash=h(900))
     right_spend = signed_tx(funded, fee=101, recipient_pubkey_hash=h(901))
     left_fruit = fruit(
         (coinbase_tx(1).to_bytes(), left_spend.to_bytes()),
         nonce=11,
-        timestamp_ms=2,
+        timestamp_ms=3,
     )
     right_fruit = fruit(
         (coinbase_tx(2).to_bytes(), right_spend.to_bytes()),
         nonce=12,
-        timestamp_ms=2,
+        timestamp_ms=3,
     )
 
     dag = BlockDAG()
@@ -60,18 +88,19 @@ def test_dag_order_allows_only_one_conflicting_spend(tmp_path: Path) -> None:
         pow_verifier=lambda _header, _target, _backend: True,
     )
     try:
-        genesis = genesis_anchor()
         assert node.process_anchor(genesis)
-        node.utxo_set.add(funded)
+        assert node.process_fruit(funding_fruit)
+        assert node.process_anchor(funding_anchor)
+        assert node.utxo_set.get(funded.outpoint) == funded
         first_fruit = _with_node_parents(
             canonical_fruits[0],
-            parent_selected=GENESIS_PARENT_HASH,
-            latest_anchor=genesis.block_hash(),
+            parent_selected=funding_fruit.block_hash(),
+            latest_anchor=funding_anchor.block_hash(),
         )
         second_fruit = _with_node_parents(
             canonical_fruits[1],
             parent_selected=first_fruit.block_hash(),
-            latest_anchor=genesis.block_hash(),
+            latest_anchor=funding_anchor.block_hash(),
             timestamp_ms=first_fruit.header.timestamp_ms + 1,
         )
         first = node.process_fruit(first_fruit)
@@ -79,7 +108,7 @@ def test_dag_order_allows_only_one_conflicting_spend(tmp_path: Path) -> None:
         anchor = _anchor_for_fruits(
             first_fruit,
             second_fruit,
-            parent_anchor=genesis.block_hash(),
+            parent_anchor=funding_anchor.block_hash(),
         )
         anchored = node.process_anchor(anchor)
 
@@ -118,15 +147,16 @@ def _with_node_parents(
 
 
 def _anchor_for_fruits(
-    first_fruit: Fruit,
-    second_fruit: Fruit,
-    *,
+    *fruits: Fruit,
     parent_anchor: bytes,
+    anchor_reward_outputs: tuple[Output, ...] = (),
 ) -> Anchor:
+    if not fruits:
+        raise ValueError("at least one fruit is required")
     tree = ShardTree()
     fee_entries = (FeeFloorEntry(ROOT_SHARD_ID, 0),)
-    covered = tuple(sorted((first_fruit.block_hash(), second_fruit.block_hash())))
-    parent_candidates = (second_fruit.block_hash(),)
+    covered = tuple(sorted(fruit_.block_hash() for fruit_ in fruits))
+    parent_candidates = (fruits[-1].block_hash(),)
     header = AnchorHeader(
         version=FORMAT_EPOCH,
         parent_anchor=parent_anchor,
@@ -134,8 +164,8 @@ def _anchor_for_fruits(
         parent_candidate_root=parent_candidate_root(parent_candidates),
         shard_tree_state_root=tree.state_root(),
         fee_floor_set_root=fee_floor_set_root(fee_entries),
-        anchor_reward_root=anchor_reward_root(()),
-        timestamp_ms=second_fruit.header.timestamp_ms + 1,
+        anchor_reward_root=anchor_reward_root(anchor_reward_outputs),
+        timestamp_ms=max(fruit_.header.timestamp_ms for fruit_ in fruits) + 1,
         nonce=99,
     )
     return Anchor(
@@ -144,4 +174,5 @@ def _anchor_for_fruits(
         parent_candidate_hashes=parent_candidates,
         shard_tree_bytes=tree.serialize(),
         fee_floor_entries=fee_entries,
+        anchor_reward_outputs=anchor_reward_outputs,
     )

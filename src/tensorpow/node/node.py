@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -16,6 +16,7 @@ from tensorpow.chain.headers import HeaderDecodeError
 from tensorpow.consensus.anchor_daa import (
     ANCHOR_INITIAL_TARGET_LE,
     AnchorRecord,
+    anchor_work_weight,
     next_anchor_target,
 )
 from tensorpow.consensus.finality import (
@@ -79,6 +80,9 @@ MINTED_SUPPLY_KEY: Final[bytes] = b"meta:minted-supply"
 FRUIT_META_BYTES: Final[int] = U64_BYTES * 2
 MAX_FUTURE_DRIFT_MS: Final[int] = 120_000
 ANCHOR_REWARD_PREFIX: Final[bytes] = b"anchorreward:"
+ANCHOR_META_PREFIX: Final[bytes] = b"anchormeta:"
+U256_BYTES: Final[int] = 32
+ANCHOR_META_BYTES: Final[int] = U64_BYTES + HASH_LEN_BYTES + U256_BYTES
 
 type PowVerifier = Callable[[PowHeader, bytes, Backend], bool]
 
@@ -87,6 +91,24 @@ type PowVerifier = Callable[[PowHeader, bytes, Backend], bool]
 class _FruitMeta:
     coinbase_claim_matoms: int
     tip_matoms: int
+
+
+@dataclass(frozen=True, slots=True)
+class _AnchorMeta:
+    height: int
+    target: bytes
+    cumulative_work: int
+
+
+@dataclass(slots=True)
+class _AnchorBranchState:
+    height: int
+    shard_tree: ShardTree
+    fee_floors: dict[int, int]
+    utxo_set: UTXOSet
+    minted_supply: int
+    claimed_fruits: dict[bytes, int]
+    confirmed_tx_ids: set[bytes]
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,74 +441,48 @@ class TensorPowNode:
             ):
                 return NodeResult.reject("bad_fee_floor_entries")
 
-            is_genesis_anchor = anchor.genesis_commitment != bytes(HASH_LEN_BYTES)
-            anchor_height = 0 if is_genesis_anchor else self._anchor_height() + 1
-            target = ANCHOR_INITIAL_TARGET_LE
-            if not is_genesis_anchor:
-                history = self._anchor_history(anchor.header.parent_anchor)
-                if history is None:
-                    return NodeResult.reject("missing_anchor_parent")
-                target = next_anchor_target(history)
-
-            staged = UTXOSet(self.utxo_set.utxos())
-            apply_result, spent_outpoints, created_utxos, effective_tips, confirmed_tx_ids = (
-                self._apply_anchor_fruits(anchor, staged=staged)
-            )
-            if apply_result is not None:
-                return NodeResult.reject(apply_result)
-            claim_result, reward_utxos, minted_increment, claim_puts = self._claim_anchor_rewards(
+            anchor_height, target, parent_cumulative_work = self._anchor_position(anchor)
+            if anchor_height is None or target is None or parent_cumulative_work is None:
+                return NodeResult.reject("missing_anchor_parent")
+            branch_state = self._rebuild_anchor_branch_state(anchor.header.parent_anchor)
+            if branch_state is None:
+                return NodeResult.reject("missing_anchor_parent")
+            apply_result = self._apply_anchor_to_branch(
                 anchor,
                 anchor_hash=anchor_hash,
                 anchor_height=anchor_height,
                 anchor_target=target,
-                effective_tips=effective_tips,
-                staged=staged,
+                state=branch_state,
             )
-            if claim_result is not None:
-                return NodeResult.reject(claim_result)
-            for utxo in reward_utxos:
-                staged.add(utxo)
+            if apply_result is not None:
+                return NodeResult.reject(apply_result)
 
-            next_minted_supply = self._minted_supply() + minted_increment
+            anchor_meta = _AnchorMeta(
+                height=anchor_height,
+                target=target,
+                cumulative_work=parent_cumulative_work + anchor_work_weight(target),
+            )
+            best_tip = self._best_anchor_tip(extra=(anchor_hash, anchor_meta))
             puts = [
                 BatchPut(COLUMN_HEADERS, anchor_hash, anchor.header.serialize()),
                 BatchPut(COLUMN_BODIES, anchor_hash, anchor.serialize()),
-                BatchPut(COLUMN_SHARD_TREE, b"current", next_tree.serialize()),
-                BatchPut(COLUMN_DAG, ANCHOR_HEIGHT_KEY, _u64(anchor_height)),
-                BatchPut(COLUMN_DAG, ANCHOR_TIP_KEY, anchor_hash),
-                BatchPut(COLUMN_DAG, MINTED_SUPPLY_KEY, _u64(next_minted_supply)),
-                *claim_puts,
-            ]
-            puts.extend(
-                BatchPut(COLUMN_UTXO, utxo.outpoint_key(), utxo.to_bytes())
-                for utxo in created_utxos
-            )
-            puts.extend(
-                BatchPut(COLUMN_UTXO, utxo.outpoint_key(), utxo.to_bytes()) for utxo in reward_utxos
-            )
-            puts.extend(
                 BatchPut(
-                    COLUMN_FEE_FLOORS,
-                    entry.shard_id.to_bytes(4, "little"),
-                    entry.floor_matoms_per_kb.to_bytes(8, "little"),
-                )
-                for entry in anchor.fee_floor_entries
-            )
-            next_fee_floor_keys = {
-                entry.shard_id.to_bytes(4, "little") for entry in anchor.fee_floor_entries
-            }
-            deletes = [
-                BatchDelete(COLUMN_FEE_FLOORS, key)
-                for key, _value in self.store.items(COLUMN_FEE_FLOORS)
-                if key not in next_fee_floor_keys
+                    COLUMN_DAG,
+                    _anchor_meta_key(anchor_hash),
+                    _encode_anchor_meta(anchor_meta),
+                ),
             ]
-            deletes.extend(BatchDelete(COLUMN_UTXO, outpoint.key()) for outpoint in spent_outpoints)
-            deletes.extend(BatchDelete(COLUMN_MEMPOOL, tx_id) for tx_id in confirmed_tx_ids)
+            deletes: list[BatchDelete] = []
+            if best_tip == anchor_hash:
+                active_batch = self._active_chain_batch(anchor_hash, branch_state)
+                puts.extend(active_batch.puts)
+                deletes.extend(active_batch.deletes)
 
             self.store.write_batch(StorageBatch(puts=tuple(puts), deletes=tuple(deletes)))
-            self.shard_tree = next_tree
-            self.utxo_set = staged
-            self.mempool = self._rebuild_mempool(self.store.mempool_txs())
+            if best_tip == anchor_hash:
+                self.shard_tree = branch_state.shard_tree
+                self.utxo_set = branch_state.utxo_set
+                self.mempool = self._rebuild_mempool(self.store.mempool_txs())
             return NodeResult.ok(anchor_hash)
 
     def _validate_anchor_dependencies(self, anchor: Anchor) -> str | None:
@@ -570,6 +566,18 @@ class TensorPowNode:
         except (TypeError, ValueError, RuntimeError):
             return False
 
+    def _anchor_position(self, anchor: Anchor) -> tuple[int | None, bytes | None, int | None]:
+        is_genesis_anchor = anchor.genesis_commitment != bytes(HASH_LEN_BYTES)
+        if is_genesis_anchor:
+            return 0, ANCHOR_INITIAL_TARGET_LE, 0
+        history = self._anchor_history(anchor.header.parent_anchor)
+        if history is None:
+            return None, None, None
+        parent_meta = self._anchor_meta(anchor.header.parent_anchor)
+        if parent_meta is None:
+            return None, None, None
+        return len(history), next_anchor_target(history), parent_meta.cumulative_work
+
     def _anchor_history(self, tip_hash: bytes) -> tuple[AnchorRecord, ...] | None:
         if tip_hash == GENESIS_PARENT_HASH:
             return None
@@ -605,6 +613,179 @@ class TensorPowNode:
             except (TypeError, ValueError):
                 return None
         return tuple(history)
+
+    def _anchor_chain_hashes(self, tip_hash: bytes) -> tuple[bytes, ...] | None:
+        if tip_hash == GENESIS_PARENT_HASH:
+            return ()
+        chain: list[bytes] = []
+        seen: set[bytes] = set()
+        current_hash = tip_hash
+        while current_hash != GENESIS_PARENT_HASH:
+            if current_hash in seen:
+                return None
+            seen.add(current_hash)
+            anchor = self._load_anchor(current_hash)
+            if anchor is None:
+                return None
+            chain.append(current_hash)
+            current_hash = anchor.header.parent_anchor
+        return tuple(reversed(chain))
+
+    def _rebuild_anchor_branch_state(self, tip_hash: bytes) -> _AnchorBranchState | None:
+        chain_hashes = self._anchor_chain_hashes(tip_hash)
+        if chain_hashes is None:
+            return None
+        state = _empty_anchor_branch_state()
+        history: list[AnchorRecord] = []
+        for anchor_hash in chain_hashes:
+            anchor = self._load_anchor(anchor_hash)
+            if anchor is None:
+                return None
+            is_genesis_anchor = anchor.genesis_commitment != bytes(HASH_LEN_BYTES)
+            anchor_height = 0 if is_genesis_anchor else len(history)
+            target = ANCHOR_INITIAL_TARGET_LE if is_genesis_anchor else next_anchor_target(history)
+            apply_result = self._apply_anchor_to_branch(
+                anchor,
+                anchor_hash=anchor_hash,
+                anchor_height=anchor_height,
+                anchor_target=target,
+                state=state,
+            )
+            if apply_result is not None:
+                return None
+            try:
+                history.append(
+                    AnchorRecord(
+                        anchor_hash=anchor_hash,
+                        parent_anchor=anchor.header.parent_anchor,
+                        timestamp_ms=anchor.header.timestamp_ms,
+                        target=target,
+                    )
+                )
+            except (TypeError, ValueError):
+                return None
+        return state
+
+    def _apply_anchor_to_branch(
+        self,
+        anchor: Anchor,
+        *,
+        anchor_hash: bytes,
+        anchor_height: int,
+        anchor_target: bytes,
+        state: _AnchorBranchState,
+    ) -> str | None:
+        try:
+            next_tree = ShardTree.deserialize(anchor.shard_tree_bytes)
+        except (TypeError, ValueError):
+            return "bad_shard_tree"
+        if tuple(entry.shard_id for entry in anchor.fee_floor_entries) != tuple(
+            next_tree.leaf_shard_ids
+        ):
+            return "bad_fee_floor_entries"
+
+        staged = UTXOSet(state.utxo_set.utxos())
+        parent_height = 0 if anchor_height == 0 else anchor_height - 1
+        apply_result, _spent_outpoints, _created_utxos, effective_tips, confirmed_tx_ids = (
+            self._apply_anchor_fruits(
+                anchor,
+                staged=staged,
+                shard_tree=state.shard_tree,
+                fee_floors=state.fee_floors,
+                current_anchor_height=parent_height,
+            )
+        )
+        if apply_result is not None:
+            return apply_result
+        claim_result, reward_utxos, minted_increment, claimed_fruits = self._claim_anchor_rewards(
+            anchor,
+            anchor_hash=anchor_hash,
+            anchor_height=anchor_height,
+            anchor_target=anchor_target,
+            effective_tips=effective_tips,
+            staged=staged,
+            minted_supply=state.minted_supply,
+            claimed_fruits=state.claimed_fruits,
+        )
+        if claim_result is not None:
+            return claim_result
+        for utxo in reward_utxos:
+            staged.add(utxo)
+
+        state.height = anchor_height
+        state.shard_tree = next_tree
+        state.fee_floors = {
+            entry.shard_id: entry.floor_matoms_per_kb for entry in anchor.fee_floor_entries
+        }
+        state.utxo_set = staged
+        state.minted_supply += minted_increment
+        for fruit_hash in claimed_fruits:
+            state.claimed_fruits[fruit_hash] = anchor_height
+        state.confirmed_tx_ids.update(confirmed_tx_ids)
+        return None
+
+    def _active_chain_batch(self, tip_hash: bytes, state: _AnchorBranchState) -> StorageBatch:
+        utxo_by_key = {utxo.outpoint_key(): utxo.to_bytes() for utxo in state.utxo_set.utxos()}
+        fee_floor_by_key = {
+            shard_id.to_bytes(4, "little"): floor.to_bytes(8, "little")
+            for shard_id, floor in sorted(state.fee_floors.items())
+        }
+        claim_by_key = {
+            _fruit_coinbase_claimed_key(fruit_hash): _u64(height)
+            for fruit_hash, height in sorted(state.claimed_fruits.items())
+        }
+
+        existing_utxo_keys = {key for key, _value in self.store.items(COLUMN_UTXO)}
+        existing_fee_floor_keys = {key for key, _value in self.store.items(COLUMN_FEE_FLOORS)}
+        existing_claim_keys = {
+            key
+            for key, _value in self.store.items(COLUMN_DAG)
+            if key.startswith(FRUIT_COINBASE_CLAIMED_PREFIX)
+        }
+
+        puts = [
+            BatchPut(COLUMN_DAG, ANCHOR_HEIGHT_KEY, _u64(state.height)),
+            BatchPut(COLUMN_DAG, ANCHOR_TIP_KEY, tip_hash),
+            BatchPut(COLUMN_DAG, MINTED_SUPPLY_KEY, _u64(state.minted_supply)),
+            BatchPut(COLUMN_SHARD_TREE, b"current", state.shard_tree.serialize()),
+        ]
+        puts.extend(BatchPut(COLUMN_UTXO, key, value) for key, value in utxo_by_key.items())
+        puts.extend(
+            BatchPut(COLUMN_FEE_FLOORS, key, value) for key, value in fee_floor_by_key.items()
+        )
+        puts.extend(BatchPut(COLUMN_DAG, key, value) for key, value in claim_by_key.items())
+
+        deletes = [
+            BatchDelete(COLUMN_UTXO, key) for key in existing_utxo_keys if key not in utxo_by_key
+        ]
+        deletes.extend(
+            BatchDelete(COLUMN_FEE_FLOORS, key)
+            for key in existing_fee_floor_keys
+            if key not in fee_floor_by_key
+        )
+        deletes.extend(
+            BatchDelete(COLUMN_DAG, key) for key in existing_claim_keys if key not in claim_by_key
+        )
+        deletes.extend(BatchDelete(COLUMN_MEMPOOL, tx_id) for tx_id in state.confirmed_tx_ids)
+        return StorageBatch(puts=tuple(puts), deletes=tuple(deletes))
+
+    def _best_anchor_tip(self, *, extra: tuple[bytes, _AnchorMeta] | None = None) -> bytes | None:
+        best_hash: bytes | None = None
+        best_meta: _AnchorMeta | None = None
+        extra_hash = None if extra is None else extra[0]
+        extra_meta = None if extra is None else extra[1]
+        for block_hash, _body in self.store.items(COLUMN_BODIES):
+            if self._load_anchor(block_hash) is None:
+                continue
+            meta = extra_meta if block_hash == extra_hash else self._anchor_meta(block_hash)
+            if meta is None:
+                continue
+            if _is_better_anchor_tip(block_hash, meta, best_hash, best_meta):
+                best_hash = block_hash
+                best_meta = meta
+        if extra is not None and _is_better_anchor_tip(extra[0], extra[1], best_hash, best_meta):
+            return extra[0]
+        return best_hash
 
     def _fruit_selected_chain_timestamps(self, tip_hash: bytes) -> tuple[int, ...]:
         if tip_hash == GENESIS_PARENT_HASH:
@@ -662,6 +843,9 @@ class TensorPowNode:
         anchor: Anchor,
         *,
         staged: UTXOSet,
+        shard_tree: ShardTree,
+        fee_floors: Mapping[int, int],
+        current_anchor_height: int,
     ) -> tuple[
         str | None, tuple[Outpoint, ...], tuple[UTXO, ...], dict[bytes, int], tuple[bytes, ...]
     ]:
@@ -669,7 +853,6 @@ class TensorPowNode:
         if ordered_fruit_hashes is None:
             return "bad_covered_fruit_order", (), (), {}, ()
 
-        current_anchor_height = self._anchor_height()
         spent_outpoints: set[Outpoint] = set()
         created_utxos: list[UTXO] = []
         effective_tips: dict[bytes, int] = {}
@@ -679,7 +862,7 @@ class TensorPowNode:
             fruit = self._load_fruit(fruit_hash)
             if fruit is None:
                 return "missing_covered_fruit", (), (), {}, ()
-            fee_floor = self._fee_floor_for_shard(fruit.header.shard_id)
+            fee_floor = fee_floors.get(fruit.header.shard_id, 0)
             try:
                 txs = tuple(Transaction.from_bytes(raw) for raw in fruit.transactions)
             except (TypeError, ValueError, TxDecodeError):
@@ -697,7 +880,7 @@ class TensorPowNode:
                 result, tip_matoms = _apply_spend_tx(
                     staged,
                     tx,
-                    shard_tree=self.shard_tree,
+                    shard_tree=shard_tree,
                     required_shard_id=fruit.header.shard_id,
                     fee_floor_matoms_per_kb=fee_floor,
                     current_time_ms=fruit.header.timestamp_ms,
@@ -853,11 +1036,12 @@ class TensorPowNode:
         anchor_target: bytes,
         effective_tips: dict[bytes, int],
         staged: UTXOSet,
-    ) -> tuple[str | None, tuple[UTXO, ...], int, tuple[BatchPut, ...]]:
+        minted_supply: int,
+        claimed_fruits: Mapping[bytes, int],
+    ) -> tuple[str | None, tuple[UTXO, ...], int, tuple[bytes, ...]]:
         if not anchor.covered_fruit_hashes:
             return None, (), 0, ()
 
-        minted_supply = self._minted_supply()
         interval_subsidy = interval_subsidy_matoms(anchor_height, minted_supply)
         _fruit_pool, anchor_pool = reward_pools(
             fruit_count=len(anchor.covered_fruit_hashes),
@@ -874,8 +1058,6 @@ class TensorPowNode:
         coinbases: dict[bytes, Transaction] = {}
         reward_keys: dict[bytes, bytes] = {}
         for fruit_hash in anchor.covered_fruit_hashes:
-            if self.store.get(COLUMN_DAG, _fruit_coinbase_claimed_key(fruit_hash)) is not None:
-                return "fruit_coinbase_already_claimed", (), 0, ()
             meta = self._fruit_meta(fruit_hash)
             if meta is None:
                 return "missing_fruit_metadata", (), 0, ()
@@ -898,9 +1080,11 @@ class TensorPowNode:
         maturity_height = coinbase_maturity_height(anchor_height)
         reward_utxos: list[UTXO] = []
         seen_reward_outpoints: set[Outpoint] = set()
-        claim_puts: list[BatchPut] = []
+        newly_claimed: list[bytes] = []
         minted_increment = anchor_reward_claim
         for fruit_hash in anchor.covered_fruit_hashes:
+            if fruit_hash in claimed_fruits:
+                return "fruit_coinbase_already_claimed", (), 0, ()
             meta = metas[fruit_hash]
             realized_tip_matoms = effective_tips.get(fruit_hash, 0)
             allowed_claim = assignments[fruit_hash] + realized_tip_matoms
@@ -918,9 +1102,7 @@ class TensorPowNode:
                     return "duplicate_coinbase_outpoint", (), 0, ()
                 seen_reward_outpoints.add(utxo.outpoint)
                 reward_utxos.append(utxo)
-            claim_puts.append(
-                BatchPut(COLUMN_DAG, _fruit_coinbase_claimed_key(fruit_hash), _u64(anchor_height))
-            )
+            newly_claimed.append(fruit_hash)
 
         for output_index, output in enumerate(anchor.anchor_reward_outputs):
             utxo = _utxo_from_anchor_output(anchor_hash, output_index, output)
@@ -931,7 +1113,7 @@ class TensorPowNode:
 
         if minted_supply + minted_increment > MAX_SUPPLY_MATOMS:
             return "supply_cap_exceeded", (), 0, ()
-        return None, tuple(reward_utxos), minted_increment, tuple(claim_puts)
+        return None, tuple(reward_utxos), minted_increment, tuple(newly_claimed)
 
     def mempool_transactions(self) -> tuple[Transaction, ...]:
         """Return current mempool transactions in deterministic order."""
@@ -966,6 +1148,23 @@ class TensorPowNode:
 
     def _fruit_meta(self, fruit_hash: bytes) -> _FruitMeta | None:
         return _decode_fruit_meta(self.store.get(COLUMN_DAG, _fruit_meta_key(fruit_hash)))
+
+    def _anchor_meta(self, anchor_hash: bytes) -> _AnchorMeta | None:
+        stored = _decode_anchor_meta(self.store.get(COLUMN_DAG, _anchor_meta_key(anchor_hash)))
+        if stored is not None:
+            return stored
+        return self._derive_anchor_meta(anchor_hash)
+
+    def _derive_anchor_meta(self, anchor_hash: bytes) -> _AnchorMeta | None:
+        history = self._anchor_history(anchor_hash)
+        if not history:
+            return None
+        cumulative_work = sum(anchor_work_weight(record.target) for record in history)
+        return _AnchorMeta(
+            height=len(history) - 1,
+            target=history[-1].target,
+            cumulative_work=cumulative_work,
+        )
 
     def _anchor_height(self) -> int:
         return _decode_u64_or_zero(self.store.get(COLUMN_DAG, ANCHOR_HEIGHT_KEY))
@@ -1218,6 +1417,10 @@ def _fruit_coinbase_claimed_key(fruit_hash: bytes) -> bytes:
     return FRUIT_COINBASE_CLAIMED_PREFIX + fruit_hash
 
 
+def _anchor_meta_key(anchor_hash: bytes) -> bytes:
+    return ANCHOR_META_PREFIX + anchor_hash
+
+
 def _encode_fruit_meta(meta: _FruitMeta) -> bytes:
     return _u64(meta.coinbase_claim_matoms) + _u64(meta.tip_matoms)
 
@@ -1231,6 +1434,51 @@ def _decode_fruit_meta(value: bytes | None) -> _FruitMeta | None:
         coinbase_claim_matoms=int.from_bytes(value[:U64_BYTES], "little"),
         tip_matoms=int.from_bytes(value[U64_BYTES:], "little"),
     )
+
+
+def _encode_anchor_meta(meta: _AnchorMeta) -> bytes:
+    if len(meta.target) != HASH_LEN_BYTES:
+        raise ValueError("anchor target must be 32 bytes")
+    return _u64(meta.height) + meta.target + _u256(meta.cumulative_work)
+
+
+def _decode_anchor_meta(value: bytes | None) -> _AnchorMeta | None:
+    if value is None:
+        return None
+    if len(value) != ANCHOR_META_BYTES:
+        return None
+    return _AnchorMeta(
+        height=int.from_bytes(value[:U64_BYTES], "little"),
+        target=value[U64_BYTES : U64_BYTES + HASH_LEN_BYTES],
+        cumulative_work=int.from_bytes(value[U64_BYTES + HASH_LEN_BYTES :], "little"),
+    )
+
+
+def _empty_anchor_branch_state() -> _AnchorBranchState:
+    return _AnchorBranchState(
+        height=0,
+        shard_tree=ShardTree(),
+        fee_floors={},
+        utxo_set=UTXOSet(),
+        minted_supply=0,
+        claimed_fruits={},
+        confirmed_tx_ids=set(),
+    )
+
+
+def _is_better_anchor_tip(
+    candidate_hash: bytes,
+    candidate_meta: _AnchorMeta,
+    best_hash: bytes | None,
+    best_meta: _AnchorMeta | None,
+) -> bool:
+    if best_hash is None or best_meta is None:
+        return True
+    if candidate_meta.cumulative_work != best_meta.cumulative_work:
+        return candidate_meta.cumulative_work > best_meta.cumulative_work
+    if candidate_meta.height != best_meta.height:
+        return candidate_meta.height > best_meta.height
+    return candidate_hash < best_hash
 
 
 def _decode_u64_or_zero(value: bytes | None) -> int:
@@ -1264,6 +1512,14 @@ def _u64(value: int) -> bytes:
     if not 0 <= value <= U64_MAX:
         raise ValueError("value outside uint64 range")
     return value.to_bytes(U64_BYTES, "little")
+
+
+def _u256(value: int) -> bytes:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError("value must be int")
+    if not 0 <= value < (1 << (U256_BYTES * 8)):
+        raise ValueError("value outside uint256 range")
+    return value.to_bytes(U256_BYTES, "little")
 
 
 def _load_or_create_identity(path: Path) -> NodeIdentity:

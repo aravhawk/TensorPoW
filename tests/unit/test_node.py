@@ -410,6 +410,89 @@ def test_anchor_parent_candidates_must_match_canonical_frontier(tmp_path: Path) 
     node.close()
 
 
+def test_competing_anchor_height_comes_from_parent_chain(tmp_path: Path) -> None:
+    node = _node(tmp_path / "node")
+    genesis = _genesis_anchor()
+    first_fruit = _fruit((_coinbase_tx(24).to_bytes(),), latest_anchor=genesis.block_hash())
+    first_anchor = _anchor(first_fruit.block_hash(), parent_anchor=genesis.block_hash())
+    sibling_fruit = _fruit(
+        (_coinbase_tx(25).to_bytes(),),
+        latest_anchor=genesis.block_hash(),
+        parent_selected=first_fruit.block_hash(),
+        timestamp_ms=2,
+        nonce=25,
+    )
+    sibling_anchor = _anchor(
+        sibling_fruit.block_hash(),
+        parent_anchor=genesis.block_hash(),
+        timestamp_ms=3,
+    )
+
+    assert node.process_anchor(genesis)
+    assert node.process_fruit(first_fruit)
+    assert node.process_anchor(first_anchor)
+    assert node.process_fruit(sibling_fruit)
+    assert node.process_anchor(sibling_anchor)
+
+    first_meta = node._anchor_meta(first_anchor.block_hash())
+    sibling_meta = node._anchor_meta(sibling_anchor.block_hash())
+    assert first_meta is not None
+    assert sibling_meta is not None
+    assert first_meta.height == 1
+    assert sibling_meta.height == 1
+    node.close()
+
+
+def test_higher_work_side_branch_reorgs_active_utxo_state(tmp_path: Path) -> None:
+    node = _node(tmp_path / "node")
+    genesis = _genesis_anchor()
+    old_coinbase = _coinbase_tx(26)
+    old_fruit = _fruit((old_coinbase.to_bytes(),), latest_anchor=genesis.block_hash())
+    old_anchor = _anchor(old_fruit.block_hash(), parent_anchor=genesis.block_hash())
+    side_coinbase = _coinbase_tx(27)
+    side_fruit = _fruit(
+        (side_coinbase.to_bytes(),),
+        latest_anchor=genesis.block_hash(),
+        parent_selected=old_fruit.block_hash(),
+        timestamp_ms=2,
+        nonce=27,
+    )
+    side_anchor = _anchor(
+        side_fruit.block_hash(),
+        parent_anchor=genesis.block_hash(),
+        timestamp_ms=3,
+    )
+    side_child_coinbase = _coinbase_tx(28)
+    side_child_fruit = _fruit(
+        (side_child_coinbase.to_bytes(),),
+        latest_anchor=side_anchor.block_hash(),
+        parent_selected=side_fruit.block_hash(),
+        timestamp_ms=4,
+        nonce=28,
+    )
+    side_child_anchor = _anchor(
+        side_child_fruit.block_hash(),
+        parent_anchor=side_anchor.block_hash(),
+        timestamp_ms=5,
+    )
+
+    assert node.process_anchor(genesis)
+    assert node.process_fruit(old_fruit)
+    assert node.process_anchor(old_anchor)
+    assert node.utxo_set.get(Outpoint(old_coinbase.tx_id(), 0)) is not None
+
+    assert node.process_fruit(side_fruit)
+    assert node.process_anchor(side_anchor)
+    assert node.process_fruit(side_child_fruit)
+    assert node.process_anchor(side_child_anchor)
+
+    assert node._anchor_height() == 2
+    assert node.utxo_set.get(Outpoint(old_coinbase.tx_id(), 0)) is None
+    assert node.utxo_set.get(Outpoint(side_coinbase.tx_id(), 0)) is not None
+    assert node.utxo_set.get(Outpoint(side_child_coinbase.tx_id(), 0)) is not None
+    node.close()
+
+
 def test_node_finality_comes_from_accepted_dag_and_anchors(tmp_path: Path) -> None:
     node = _node(tmp_path / "node")
     genesis = _genesis_anchor()
@@ -584,6 +667,7 @@ def _anchor(
     parent_anchor: bytes,
     fee_floor_matoms_per_kb: int = 5,
     anchor_reward_outputs: tuple[Output, ...] = (),
+    timestamp_ms: int = 2,
 ) -> Anchor:
     return _anchor_many(
         (covered_fruit_hash,),
@@ -591,6 +675,7 @@ def _anchor(
         parent_candidate_hashes=(covered_fruit_hash,),
         fee_floor_matoms_per_kb=fee_floor_matoms_per_kb,
         anchor_reward_outputs=anchor_reward_outputs,
+        timestamp_ms=timestamp_ms,
     )
 
 
@@ -601,6 +686,7 @@ def _anchor_many(
     parent_candidate_hashes: tuple[bytes, ...],
     fee_floor_matoms_per_kb: int = 5,
     anchor_reward_outputs: tuple[Output, ...] = (),
+    timestamp_ms: int = 2,
 ) -> Anchor:
     tree = ShardTree()
     fee_entries = (FeeFloorEntry(ROOT_SHARD_ID, fee_floor_matoms_per_kb),)
@@ -613,7 +699,7 @@ def _anchor_many(
         shard_tree_state_root=tree.state_root(),
         fee_floor_set_root=fee_floor_set_root(fee_entries),
         anchor_reward_root=anchor_reward_root(anchor_reward_outputs),
-        timestamp_ms=2,
+        timestamp_ms=timestamp_ms,
         nonce=3,
     )
     return Anchor(
