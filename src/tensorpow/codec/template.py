@@ -241,10 +241,11 @@ def _decompress_body(compressed: bytes) -> Transaction:
     reader.finish()
     try:
         template_payload = _range_decode(range_bytes, template_payload_len)
+        return _decompress_template_payload(template_payload)
+    except TemplateCodecError:
+        raise
     except (TypeError, ValueError) as exc:
-        raise TemplateCodecError("template range bytes are malformed") from exc
-
-    return _decompress_template_payload(template_payload)
+        raise TemplateCodecError("template range payload is malformed") from exc
 
 
 def _decompress_template_payload(template_payload: bytes) -> Transaction:

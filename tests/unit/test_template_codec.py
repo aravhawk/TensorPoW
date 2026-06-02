@@ -171,6 +171,24 @@ def test_template_codec_rejects_noncanonical_direct_signer_hash_output() -> None
         decompress_tx(_object_with_template_payload(compressed, noncanonical_payload))
 
 
+def test_template_codec_wraps_transaction_construction_errors() -> None:
+    compressed = compress_tx(_typical_pkh_tx())
+    zero_amount_payload = b"".join(
+        (
+            b"\x00",
+            b"\x00",
+            b"\x01",
+            b"\x00",
+            bytes((template_codec.OUT_PKH_DIRECT,)),
+            PKH_1,
+            b"\x00",
+        )
+    )
+
+    with pytest.raises(TemplateCodecError, match="payload"):
+        decompress_tx(_object_with_template_payload(compressed, zero_amount_payload))
+
+
 def test_template_codec_header_is_consistent_with_lengths() -> None:
     tx = _typical_pkh_tx()
     compressed = compress_tx(tx)
