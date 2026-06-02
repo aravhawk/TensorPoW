@@ -32,6 +32,9 @@ KEYSTORE_KEY_BYTES: Final[int] = 32
 SCRYPT_N: Final[int] = 2**14
 SCRYPT_R: Final[int] = 8
 SCRYPT_P: Final[int] = 1
+SCRYPT_MAX_N: Final[int] = SCRYPT_N
+SCRYPT_MAX_R: Final[int] = SCRYPT_R
+SCRYPT_MAX_P: Final[int] = SCRYPT_P
 
 U32_MAX: Final[int] = 0xFFFFFFFF
 U64_MAX: Final[int] = 0xFFFFFFFFFFFFFFFF
@@ -582,9 +585,7 @@ def _derive_keystore_key(
     p: int = SCRYPT_P,
 ) -> bytes:
     _require_exact_bytes("salt", salt, KEYSTORE_SALT_BYTES)
-    _require_positive_int("n", n)
-    _require_positive_int("r", r)
-    _require_positive_int("p", p)
+    _require_scrypt_params(n=n, r=r, p=p)
     return Scrypt(salt=salt, length=KEYSTORE_KEY_BYTES, n=n, r=r, p=p).derive(password)
 
 
@@ -656,6 +657,18 @@ def _require_utxos(utxos: object) -> tuple[UTXO, ...]:
     return result
 
 
+def _require_scrypt_params(*, n: int, r: int, p: int) -> None:
+    _require_positive_int("n", n)
+    _require_positive_int("r", r)
+    _require_positive_int("p", p)
+    if n > SCRYPT_MAX_N:
+        raise WalletError("scrypt n exceeds maximum")
+    if r > SCRYPT_MAX_R:
+        raise WalletError("scrypt r exceeds maximum")
+    if p > SCRYPT_MAX_P:
+        raise WalletError("scrypt p exceeds maximum")
+
+
 def _utxo_is_mature(utxo: UTXO, *, current_time_ms: int, current_height: int) -> bool:
     return (utxo.locktime_ms == 0 or current_time_ms >= utxo.locktime_ms) and (
         utxo.lockheight == 0 or current_height >= utxo.lockheight
@@ -693,6 +706,9 @@ __all__ = [
     "KEYSTORE_CIPHER",
     "KEYSTORE_FORMAT",
     "KEYSTORE_KDF",
+    "SCRYPT_MAX_N",
+    "SCRYPT_MAX_P",
+    "SCRYPT_MAX_R",
     "SCRYPT_N",
     "SCRYPT_P",
     "SCRYPT_R",

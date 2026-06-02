@@ -10,7 +10,16 @@ import pytest
 from tensorpow.state.utxo import MAX_SUPPLY_MATOMS, TEMPLATE_PKH, UTXO, Outpoint
 from tensorpow.tx.script import verify_utxo_spend
 from tensorpow.tx.transaction import Transaction
-from tensorpow.wallet import Wallet, WalletError, load_wallet, recover_wallet, utxos_to_json
+from tensorpow.wallet import (
+    SCRYPT_MAX_N,
+    SCRYPT_MAX_P,
+    SCRYPT_MAX_R,
+    Wallet,
+    WalletError,
+    load_wallet,
+    recover_wallet,
+    utxos_to_json,
+)
 
 
 def test_wallet_keystore_round_trip_and_recovery(tmp_path: Path) -> None:
@@ -27,6 +36,30 @@ def test_wallet_keystore_round_trip_and_recovery(tmp_path: Path) -> None:
         load_wallet(path, "wrong password")
     with pytest.raises(WalletError, match="hex"):
         Wallet.recover("not-hex")
+
+
+@pytest.mark.parametrize(
+    ("param", "value", "message"),
+    (
+        ("n", SCRYPT_MAX_N * 2, "scrypt n"),
+        ("r", SCRYPT_MAX_R + 1, "scrypt r"),
+        ("p", SCRYPT_MAX_P + 1, "scrypt p"),
+    ),
+)
+def test_wallet_keystore_rejects_excessive_scrypt_params(
+    tmp_path: Path,
+    param: str,
+    value: int,
+    message: str,
+) -> None:
+    wallet = Wallet.create()
+    path = wallet.save(tmp_path / f"{param}.json", "correct horse")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["kdf_params"][param] = value
+    path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(WalletError, match=message):
+        load_wallet(path, "correct horse")
 
 
 def test_wallet_builds_signed_pkh_transaction_and_change() -> None:
