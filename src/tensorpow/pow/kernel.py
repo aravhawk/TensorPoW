@@ -81,9 +81,7 @@ def matmul_int8(
         torch.cuda.synchronize()
         result = result.cpu()
     elif resolved_backend == "mps":
-        result = left_tensor.to("mps").to(torch.int32) @ right_tensor.to("mps").to(torch.int32)
-        torch.mps.synchronize()
-        result = result.cpu()
+        result = _mps_int32_mm(left_tensor, right_tensor)
     else:
         result = _int_mm(left_tensor, right_tensor)
 
@@ -201,18 +199,39 @@ def _int_mm(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
     return left.to(torch.int32) @ right.to(torch.int32)
 
 
+def _mps_int32_mm(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+    result = left.to("mps").to(torch.int32) @ right.to("mps").to(torch.int32)
+    torch.mps.synchronize()
+    return result.cpu()
+
+
+def _mps_probe_matrices() -> tuple[torch.Tensor, torch.Tensor]:
+    values = torch.arange(POW_MATRIX_BYTES, dtype=torch.int32).reshape(
+        POW_MATRIX_DIM,
+        POW_MATRIX_DIM,
+    )
+    left = ((values * 73 + 19) % 256 - 128).to(torch.int8).contiguous()
+    right = ((values * 37 + 91) % 256 - 128).to(torch.int8).contiguous()
+    left[:16, :] = INT8_MIN_VALUE
+    right[:, :16] = INT8_MIN_VALUE
+    return left, right
+
+
 @cache
 def _mps_int32_mm_available() -> bool:
     if not torch.backends.mps.is_available():
         return False
     try:
-        left = torch.zeros((32, 32), dtype=torch.int8, device="mps").to(torch.int32)
-        right = torch.zeros((32, 32), dtype=torch.int8, device="mps").to(torch.int32)
-        result = left @ right
-        torch.mps.synchronize()
+        left, right = _mps_probe_matrices()
+        reference = _int_mm(left, right)
+        result = _mps_int32_mm(left, right)
     except RuntimeError:
         return False
-    return result.dtype == torch.int32
+    return (
+        result.dtype == torch.int32
+        and tuple(result.shape) == tuple(reference.shape)
+        and torch.equal(result, reference)
+    )
 
 
 def _require_bytes_len(name: str, value: bytes, expected_len: int) -> None:

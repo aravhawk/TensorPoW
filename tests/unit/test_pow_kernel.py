@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+import tensorpow.pow.kernel as kernel
 from tensorpow.crypto.hash import HASH_LEN_BYTES
 from tensorpow.pow.kernel import (
     ANCHOR_INITIAL_TARGET_LE,
@@ -98,3 +99,23 @@ def test_matmul_int8_handles_signed_extreme_values() -> None:
     assert result.shape == (POW_MATRIX_DIM, POW_MATRIX_DIM)
     assert int(result[0, 0]) == 127 * -128 * POW_MATRIX_DIM
     assert torch.equal(result[0, :16], torch.full((16,), 127 * -128 * POW_MATRIX_DIM))
+
+
+def test_mps_probe_requires_exact_cpu_parity(monkeypatch: pytest.MonkeyPatch) -> None:
+    left = torch.tensor([[1, -128], [127, 3]], dtype=torch.int8)
+    right = torch.tensor([[-128, 7], [5, 11]], dtype=torch.int8)
+    reference = left.to(torch.int32) @ right.to(torch.int32)
+    mismatch = reference.clone()
+    mismatch[0, 0] += 1
+
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    monkeypatch.setattr(kernel, "_mps_probe_matrices", lambda: (left, right))
+    monkeypatch.setattr(kernel, "_int_mm", lambda _left, _right: reference)
+    monkeypatch.setattr(kernel, "_mps_int32_mm", lambda _left, _right: mismatch)
+    kernel._mps_int32_mm_available.cache_clear()
+    assert not kernel._mps_int32_mm_available()
+
+    monkeypatch.setattr(kernel, "_mps_int32_mm", lambda _left, _right: reference)
+    kernel._mps_int32_mm_available.cache_clear()
+    assert kernel._mps_int32_mm_available()
+    kernel._mps_int32_mm_available.cache_clear()
