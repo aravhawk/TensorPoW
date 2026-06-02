@@ -18,14 +18,14 @@ from tensorpow.chain.blocks import (
     tx_merkle_root,
 )
 from tensorpow.chain.headers import AnchorHeader, FruitHeader
-from tensorpow.consensus.anchor_daa import ANCHOR_INITIAL_TARGET_LE
+from tensorpow.consensus.anchor_daa import ANCHOR_INITIAL_TARGET_LE, AnchorRecord
 from tensorpow.consensus.rewards import interval_subsidy_matoms, reward_pools
 from tensorpow.crypto.hash import HASH_LEN_BYTES, hash_bytes
 from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
 from tensorpow.genesis import GENESIS_CHAIN_ID_TESTNET, GenesisInputs, build_genesis_artifact
 from tensorpow.mempool import ROOT_SHARD_ID, ShardTree
 from tensorpow.node import TensorPowConfig, TensorPowNode, write_default_config
-from tensorpow.pow.challenge import FORMAT_EPOCH
+from tensorpow.pow.challenge import FORMAT_EPOCH, GENESIS_PARENT_HASH
 from tensorpow.state.utxo import MAX_SUPPLY_MATOMS, TEMPLATE_PKH, UTXO, Outpoint
 from tensorpow.tx.transaction import Output, Transaction
 from tensorpow.wallet import Wallet
@@ -391,6 +391,39 @@ def test_fruit_timestamps_reject_future_and_parent_time_regressions(tmp_path: Pa
     assert node.process_fruit(future).reason == "fruit_time_too_new"
     assert node.process_fruit(parent)
     assert node.process_fruit(child).reason == "fruit_time_not_after_parent"
+    node.close()
+
+
+def test_anchor_timestamp_rejects_median_time_past_regression(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node = _node(tmp_path / "node")
+    covered_fruit_hash = bytes.fromhex("77" * HASH_LEN_BYTES)
+    history_hashes = tuple(index.to_bytes(HASH_LEN_BYTES, "little") for index in range(1, 12))
+    timestamps = (100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 1)
+    history = tuple(
+        AnchorRecord(
+            anchor_hash=history_hashes[index],
+            parent_anchor=GENESIS_PARENT_HASH if index == 0 else history_hashes[index - 1],
+            timestamp_ms=timestamps[index],
+            target=ANCHOR_INITIAL_TARGET_LE,
+        )
+        for index in range(len(history_hashes))
+    )
+    anchor = _anchor_many(
+        (covered_fruit_hash,),
+        parent_anchor=history[-1].anchor_hash,
+        parent_candidate_hashes=(covered_fruit_hash,),
+        timestamp_ms=2,
+    )
+    dummy_fruit = _fruit((_coinbase_tx(31).to_bytes(),), latest_anchor=history[-1].anchor_hash)
+
+    monkeypatch.setattr(node, "_anchor_history", lambda _tip_hash: history)
+    monkeypatch.setattr(node, "_load_fruit", lambda _fruit_hash: dummy_fruit)
+    monkeypatch.setattr(node, "_canonical_parent_candidates", lambda: (covered_fruit_hash,))
+
+    assert node._validate_anchor_dependencies(anchor) == "anchor_time_too_old"
     node.close()
 
 

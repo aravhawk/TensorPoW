@@ -79,6 +79,7 @@ ANCHOR_TIP_KEY: Final[bytes] = b"meta:anchor-tip"
 MINTED_SUPPLY_KEY: Final[bytes] = b"meta:minted-supply"
 FRUIT_META_BYTES: Final[int] = U64_BYTES * 2
 MAX_FUTURE_DRIFT_MS: Final[int] = 120_000
+MEDIAN_TIME_PAST_WINDOW: Final[int] = 11
 ANCHOR_REWARD_PREFIX: Final[bytes] = b"anchorreward:"
 ANCHOR_META_PREFIX: Final[bytes] = b"anchormeta:"
 U256_BYTES: Final[int] = 32
@@ -504,6 +505,9 @@ class TensorPowNode:
             return "missing_anchor_parent"
         if history and anchor.header.timestamp_ms <= history[-1].timestamp_ms:
             return "anchor_time_not_increasing"
+        anchor_mtp = _anchor_median_time_past(history)
+        if anchor_mtp is not None and anchor.header.timestamp_ms <= anchor_mtp:
+            return "anchor_time_too_old"
         target = next_anchor_target(history)
         if not self._verify_pow(anchor.header.to_pow_header(), target):
             return "anchor_pow_invalid"
@@ -793,7 +797,7 @@ class TensorPowNode:
         timestamps: list[int] = []
         seen: set[bytes] = set()
         current_hash = tip_hash
-        while current_hash != GENESIS_PARENT_HASH and len(timestamps) < 11:
+        while current_hash != GENESIS_PARENT_HASH and len(timestamps) < MEDIAN_TIME_PAST_WINDOW:
             if current_hash in seen:
                 return ()
             seen.add(current_hash)
@@ -1495,6 +1499,13 @@ def _decode_optional_u64(value: bytes | None) -> int | None:
     if len(value) != U64_BYTES:
         return None
     return int.from_bytes(value, "little")
+
+
+def _anchor_median_time_past(history: tuple[AnchorRecord, ...]) -> int | None:
+    if not history:
+        return None
+    timestamps = tuple(record.timestamp_ms for record in history[-MEDIAN_TIME_PAST_WINDOW:])
+    return _median_int(timestamps)
 
 
 def _median_int(values: tuple[int, ...]) -> int:
