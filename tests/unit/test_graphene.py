@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import signal
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+import tensorpow.net.graphene as graphene
 from tensorpow.chain.blocks import Fruit, tx_merkle_root
 from tensorpow.chain.headers import FruitHeader
 from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
@@ -97,6 +102,23 @@ def test_repeated_announcements_are_deterministic() -> None:
     assert first == second == third
 
 
+def test_iblt_peel_rejects_non_self_clearing_pure_cell() -> None:
+    cell_count = 6
+    key = b"trapkey1"
+    trap_index = _outside_graphene_positions(key, cell_count)
+    cells = [
+        graphene._IBLTCell(count=0, key_sum=bytes(8), checksum_sum=0) for _ in range(cell_count)
+    ]
+    cells[trap_index] = graphene._IBLTCell(
+        count=1,
+        key_sum=key,
+        checksum_sum=graphene._iblt_checksum(key),
+    )
+
+    with _deadline():
+        assert graphene._peel_iblt(tuple(cells)) is None
+
+
 def _fruit(transactions: tuple[bytes, ...]) -> Fruit:
     header = FruitHeader(
         version=FORMAT_EPOCH,
@@ -181,3 +203,22 @@ def _sketch_offsets(sketch: bytes) -> tuple[int, int, int, int, int]:
     iblt_start = bloom_start + bloom_len
     short_ids_start = iblt_start + iblt_cell_count * 14
     return bloom_start, bloom_len, short_id_width, iblt_start, short_ids_start
+
+
+def _outside_graphene_positions(key: bytes, cell_count: int) -> int:
+    positions = set(graphene._iblt_positions(key, cell_count))
+    return next(index for index in range(cell_count) if index not in positions)
+
+
+@contextmanager
+def _deadline() -> Iterator[None]:
+    def _raise_timeout(_signum: int, _frame: object) -> None:
+        raise AssertionError("IBLT peel did not terminate")
+
+    previous = signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, 1.0)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous)

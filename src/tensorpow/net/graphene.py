@@ -8,6 +8,7 @@ from typing import Final
 
 from blake3 import blake3
 
+from tensorpow._iblt import peel_iblt_cells
 from tensorpow.chain.blocks import Fruit, tx_id
 from tensorpow.chain.headers import FruitHeader
 from tensorpow.crypto.hash import HASH_LEN_BYTES
@@ -318,27 +319,18 @@ def _subtract_iblt(
 
 
 def _peel_iblt(cells: tuple[_IBLTCell, ...]) -> tuple[tuple[bytes, ...], tuple[bytes, ...]] | None:
-    working = list(cells)
-    sender_only: list[bytes] = []
-    receiver_only: list[bytes] = []
-    while True:
-        pure_index = next(
-            (index for index, cell in enumerate(working) if _is_pure_iblt_cell(cell)),
-            None,
-        )
-        if pure_index is None:
-            break
-        cell = working[pure_index]
-        if cell.count == 1:
-            sender_only.append(cell.key_sum)
-            delta = -1
-        else:
-            receiver_only.append(cell.key_sum)
-            delta = 1
-        _apply_iblt_key(working, cell.key_sum, delta=delta)
-
-    if any(not _is_empty_iblt_cell(cell) for cell in working):
+    peeled = peel_iblt_cells(
+        cells,
+        is_pure=_is_pure_iblt_cell,
+        is_empty=_is_empty_iblt_cell,
+        cell_key=lambda cell: cell.key_sum,
+        peel_delta=lambda cell: -1 if cell.count == 1 else 1,
+        apply_key=lambda working, key, delta: _apply_iblt_key(working, key, delta=delta),
+    )
+    if peeled is None:
         return None
+    sender_only = tuple(key for key, delta in peeled if delta == -1)
+    receiver_only = tuple(key for key, delta in peeled if delta == 1)
     return tuple(sorted(sender_only)), tuple(sorted(receiver_only))
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, Protocol, runtime_checkable
 
+from tensorpow._iblt import peel_iblt_cells
 from tensorpow.crypto.hash import HASH_LEN_BYTES, hash_bytes
 from tensorpow.state.utxo import (
     OUTPOINT_BYTES,
@@ -375,21 +376,17 @@ def _validate_iblt_sketch(cells: tuple[_IBLTCell, ...], decoded: _DecodedUTXODif
 
 
 def _peel_iblt(cells: tuple[_IBLTCell, ...]) -> tuple[bytes, ...] | None:
-    working = list(cells)
-    peeled: list[bytes] = []
-    while True:
-        pure_index = next(
-            (index for index, cell in enumerate(working) if _is_pure_iblt_cell(cell)),
-            None,
-        )
-        if pure_index is None:
-            break
-        key = working[pure_index].key_sum
-        peeled.append(key)
-        _apply_iblt_key(working, key, delta=-1)
-    if any(not _is_empty_iblt_cell(cell) for cell in working):
+    peeled = peel_iblt_cells(
+        cells,
+        is_pure=_is_pure_iblt_cell,
+        is_empty=_is_empty_iblt_cell,
+        cell_key=lambda cell: cell.key_sum,
+        peel_delta=lambda _cell: -1,
+        apply_key=lambda working, key, delta: _apply_iblt_key(working, key, delta=delta),
+    )
+    if peeled is None:
         return None
-    return tuple(sorted(peeled))
+    return tuple(sorted(key for key, _delta in peeled))
 
 
 def _apply_iblt_key(cells: list[_IBLTCell], key: bytes, *, delta: int) -> None:

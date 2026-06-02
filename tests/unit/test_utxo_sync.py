@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import signal
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 
 import pytest
 
@@ -302,5 +304,42 @@ def test_empty_node_diff_is_less_than_twice_full_download_for_medium_fixture() -
     assert len(diff) <= (2 * full_download_size)
 
 
+def test_iblt_peel_rejects_non_self_clearing_pure_cell() -> None:
+    cell_count = 5
+    key = b"trapkey2"
+    trap_index = _outside_utxo_positions(key, cell_count)
+    cells = [
+        sync._IBLTCell(count=0, key_sum=bytes(sync.UTXO_IBLT_KEY_BYTES), checksum_sum=0)
+        for _ in range(cell_count)
+    ]
+    cells[trap_index] = sync._IBLTCell(
+        count=1,
+        key_sum=key,
+        checksum_sum=sync._iblt_checksum(key),
+    )
+
+    with _deadline():
+        assert sync._peel_iblt(tuple(cells)) is None
+
+
 def _iblt_size(change_count: int) -> int:
     return sync._canonical_iblt_cell_count(change_count) * sync.UTXO_IBLT_CELL_BYTES
+
+
+def _outside_utxo_positions(key: bytes, cell_count: int) -> int:
+    positions = set(sync._iblt_positions(key, cell_count))
+    return next(index for index in range(cell_count) if index not in positions)
+
+
+@contextmanager
+def _deadline() -> Iterator[None]:
+    def _raise_timeout(_signum: int, _frame: object) -> None:
+        raise AssertionError("IBLT peel did not terminate")
+
+    previous = signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, 1.0)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous)
