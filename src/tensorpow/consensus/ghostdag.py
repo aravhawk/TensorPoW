@@ -59,6 +59,7 @@ class BlockDAG:
 
     def __init__(self, blocks: Iterable[FruitBlock] | None = None) -> None:
         self._blocks: dict[FruitHash, FruitBlock] = {}
+        self._ancestor_cache: dict[FruitHash, frozenset[FruitHash]] = {}
         self._metadata_cache: dict[int, dict[FruitHash, GhostdagData]] = {}
         for block in blocks or ():
             self.add_block(block)
@@ -102,7 +103,12 @@ class BlockDAG:
             if block.timestamp_ms <= parent_block.timestamp_ms:
                 raise ValueError("fruit timestamp must be greater than parent timestamps")
 
+        ancestors: set[FruitHash] = set()
+        for parent in block.parents:
+            ancestors.add(parent)
+            ancestors.update(self._ancestor_cache[parent])
         self._blocks[block.fruit_hash] = block
+        self._ancestor_cache[block.fruit_hash] = frozenset(ancestors)
         self._metadata_cache.clear()
         return block
 
@@ -125,15 +131,7 @@ class BlockDAG:
         """Return all strict ancestors of a fruit."""
 
         self.get_block(fruit_hash)
-        ancestors: set[FruitHash] = set()
-        stack = list(self._blocks[fruit_hash].parents)
-        while stack:
-            parent = stack.pop()
-            if parent in ancestors:
-                continue
-            ancestors.add(parent)
-            stack.extend(self._blocks[parent].parents)
-        return frozenset(ancestors)
+        return self._ancestor_cache[fruit_hash]
 
     def ghostdag_data(self, fruit_hash: FruitHash, k: int) -> GhostdagData:
         """Return cached GHOSTDAG metadata for a fruit and K."""

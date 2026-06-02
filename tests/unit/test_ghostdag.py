@@ -48,6 +48,18 @@ def test_linear_dag_is_all_blue_and_topologically_ordered() -> None:
     assert dag.ghostdag_data(_h(3), 15).selected_parent == _h(2)
 
 
+def test_ancestors_are_cached_incrementally() -> None:
+    dag = BlockDAG()
+    dag.add_fruit(_h(1), timestamp_ms=1)
+    dag.add_fruit(_h(2), (_h(1),), timestamp_ms=2)
+    dag.add_fruit(_h(3), (_h(2),), timestamp_ms=3)
+
+    ancestors = dag.ancestors(_h(3))
+
+    assert ancestors == frozenset((_h(1), _h(2)))
+    assert dag.ancestors(_h(3)) is ancestors
+
+
 def test_merge_selects_highest_blue_work_then_lexicographic_parent() -> None:
     dag = BlockDAG()
     dag.add_fruit(_h(1), timestamp_ms=1, work=1)

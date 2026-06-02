@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import tensorpow.node.node as node_module
 from tensorpow.chain.blocks import (
     Anchor,
     FeeFloorEntry,
@@ -19,6 +20,7 @@ from tensorpow.chain.blocks import (
 )
 from tensorpow.chain.headers import AnchorHeader, FruitHeader
 from tensorpow.consensus.anchor_daa import ANCHOR_INITIAL_TARGET_LE, AnchorRecord
+from tensorpow.consensus.ghostdag import DYNAMIC_K_MIN
 from tensorpow.consensus.rewards import interval_subsidy_matoms, reward_pools
 from tensorpow.crypto.hash import HASH_LEN_BYTES, hash_bytes
 from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
@@ -438,7 +440,7 @@ def test_anchor_timestamp_rejects_median_time_past_regression(
     )
     dummy_fruit = _fruit((_coinbase_tx(31).to_bytes(),), latest_anchor=history[-1].anchor_hash)
 
-    monkeypatch.setattr(node, "_anchor_history", lambda _tip_hash: history)
+    monkeypatch.setattr(node, "_anchor_history", lambda _tip_hash, *, limit=None: history)
     monkeypatch.setattr(node, "_load_fruit", lambda _fruit_hash: dummy_fruit)
     monkeypatch.setattr(node, "_canonical_parent_candidates", lambda: (covered_fruit_hash,))
 
@@ -492,6 +494,76 @@ def test_competing_anchor_height_comes_from_parent_chain(tmp_path: Path) -> None
     assert sibling_meta is not None
     assert first_meta.height == 1
     assert sibling_meta.height == 1
+    node.close()
+
+
+def test_anchor_history_and_rebuild_use_stored_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    node = _node(tmp_path / "node")
+    genesis = _genesis_anchor()
+    fruit = _fruit((_coinbase_tx(29).to_bytes(),), latest_anchor=genesis.block_hash())
+    anchor = _anchor(fruit.block_hash(), parent_anchor=genesis.block_hash())
+
+    assert node.process_anchor(genesis)
+    assert node.process_fruit(fruit)
+    assert node.process_anchor(anchor)
+
+    def fail_next_anchor_target(_history: object) -> bytes:
+        raise AssertionError("next_anchor_target should not be called for stored metadata")
+
+    monkeypatch.setattr(node_module, "next_anchor_target", fail_next_anchor_target)
+
+    history = node._anchor_history(anchor.block_hash())
+    branch_state = node._rebuild_anchor_branch_state(anchor.block_hash())
+    anchor_meta = node._anchor_meta(anchor.block_hash())
+
+    assert history is not None
+    assert [record.anchor_hash for record in history] == [
+        genesis.block_hash(),
+        anchor.block_hash(),
+    ]
+    assert anchor_meta is not None
+    assert history[-1].target == anchor_meta.target
+    assert branch_state is not None
+    assert branch_state.height == anchor_meta.height
+    node.close()
+
+
+def test_fruit_dag_cache_reuses_until_new_fruit(tmp_path: Path) -> None:
+    node = _node(tmp_path / "node")
+    genesis = _genesis_anchor()
+    first = _fruit((_coinbase_tx(30).to_bytes(),), latest_anchor=genesis.block_hash())
+    second = _fruit(
+        (_coinbase_tx(31).to_bytes(),),
+        latest_anchor=genesis.block_hash(),
+        parent_selected=first.block_hash(),
+        timestamp_ms=2,
+        nonce=31,
+    )
+
+    assert node.process_anchor(genesis)
+    assert node.process_fruit(first)
+    first_dag = node._fruit_dag()
+    cached_dag = node._fruit_dag()
+
+    assert first_dag is not None
+    assert cached_dag is first_dag
+
+    assert node.process_fruit(second)
+    refreshed_dag = node._fruit_dag()
+
+    assert refreshed_dag is not None
+    assert refreshed_dag is not first_dag
+    assert refreshed_dag.has_block(second.block_hash())
+    node.close()
+
+
+def test_node_ghostdag_k_is_fixed_to_protocol_minimum(tmp_path: Path) -> None:
+    node = _node(tmp_path / "node")
+
+    assert node._ghostdag_k() == DYNAMIC_K_MIN
     node.close()
 
 

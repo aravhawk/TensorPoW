@@ -331,10 +331,19 @@ parent and optional additional parents. Parent edges always point to earlier
 fruits by timestamp and known DAG reachability. A fruit that would introduce a
 cycle is invalid.
 
-For a tip candidate, TensorPoW computes:
+For this protocol version, TensorPoW uses a fixed GHOSTDAG parameter:
 
 ```text
-k = clamp(
+k = DYNAMIC_K_MIN
+```
+
+All consensus paths that classify, order, or select fruit DAG candidates MUST
+use this fixed value. The dynamic formula below is reserved for a future
+versioned activation and MUST NOT be used for consensus until the observation
+inputs are specified as deterministic chain-derived values:
+
+```text
+reserved_dynamic_k = clamp(
     ceil(DYNAMIC_K_FACTOR * observed_lambda * observed_d_max_ms / MS_PER_SECOND
          * ln(1 / delta)),
     DYNAMIC_K_MIN,
@@ -346,7 +355,9 @@ k = clamp(
 `DYNAMIC_K_OBSERVATION_ANCHORS`. `observed_d_max_ms` is the network propagation
 delay estimate bounded by `DYNAMIC_K_D_MAX_MIN_MS` and
 `DYNAMIC_K_D_MAX_MAX_MS`. `delta` is `DYNAMIC_K_DELTA_NUM /
-DYNAMIC_K_DELTA_DEN`.
+DYNAMIC_K_DELTA_DEN`. These values are advisory/reserved in this version; an
+implementation that feeds local wall-clock or network measurements into
+consensus K is non-conformant.
 
 GHOSTDAG classification follows the greedy algorithm from PHANTOM/GHOSTDAG:
 
@@ -1056,14 +1067,14 @@ roots.
 
 | Constant | Value | Meaning |
 |---|---:|---|
-| `DYNAMIC_K_FACTOR` | `2` | Leading factor in dynamic K formula. |
-| `DYNAMIC_K_MIN` | `15` | Minimum K. |
-| `DYNAMIC_K_MAX` | `10000` | Maximum K. |
-| `DYNAMIC_K_DELTA_NUM` | `1` | Delta numerator. |
-| `DYNAMIC_K_DELTA_DEN` | `1000000` | Delta denominator. |
-| `DYNAMIC_K_OBSERVATION_ANCHORS` | `100` | Observation window for lambda. |
-| `DYNAMIC_K_D_MAX_MIN_MS` | `100` | Lower propagation-delay bound. |
-| `DYNAMIC_K_D_MAX_MAX_MS` | `5000` | Upper propagation-delay bound. |
+| `DYNAMIC_K_FACTOR` | `2` | Reserved leading factor in inactive dynamic K formula. |
+| `DYNAMIC_K_MIN` | `15` | Consensus GHOSTDAG K for this version. |
+| `DYNAMIC_K_MAX` | `10000` | Reserved maximum K for inactive dynamic formula. |
+| `DYNAMIC_K_DELTA_NUM` | `1` | Reserved delta numerator. |
+| `DYNAMIC_K_DELTA_DEN` | `1000000` | Reserved delta denominator. |
+| `DYNAMIC_K_OBSERVATION_ANCHORS` | `100` | Reserved observation window for lambda. |
+| `DYNAMIC_K_D_MAX_MIN_MS` | `100` | Reserved lower propagation-delay bound. |
+| `DYNAMIC_K_D_MAX_MAX_MS` | `5000` | Reserved upper propagation-delay bound. |
 | `PARENT_BITMAP_MAX_BYTES` | `1250` | Bitmap bytes for `DYNAMIC_K_MAX` candidates. |
 | `PARENT_CANDIDATE_MAX_COUNT` | `10000` | Maximum anchor parent candidates. |
 | `ADVERSARY_REORG_COMPUTE_PCT_LIMIT` | `40` | Regression-test attacker limit. |

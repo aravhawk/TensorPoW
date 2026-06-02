@@ -15,6 +15,7 @@ from tensorpow.chain.blocks import PARENT_CANDIDATE_MAX_COUNT, Anchor, BlockDeco
 from tensorpow.chain.headers import HeaderDecodeError
 from tensorpow.consensus.anchor_daa import (
     ANCHOR_INITIAL_TARGET_LE,
+    WTEMA_WINDOW_ANCHORS,
     AnchorRecord,
     anchor_work_weight,
     next_anchor_target,
@@ -80,6 +81,7 @@ MINTED_SUPPLY_KEY: Final[bytes] = b"meta:minted-supply"
 FRUIT_META_BYTES: Final[int] = U64_BYTES * 2
 MAX_FUTURE_DRIFT_MS: Final[int] = 120_000
 MEDIAN_TIME_PAST_WINDOW: Final[int] = 11
+ANCHOR_HISTORY_LOOKBACK: Final[int] = max(WTEMA_WINDOW_ANCHORS + 1, MEDIAN_TIME_PAST_WINDOW)
 ANCHOR_REWARD_PREFIX: Final[bytes] = b"anchorreward:"
 ANCHOR_META_PREFIX: Final[bytes] = b"anchormeta:"
 U256_BYTES: Final[int] = 32
@@ -254,6 +256,7 @@ class TensorPowNode:
         self.utxo_set = UTXOSet(self.store.utxos())
         self.mempool = self._rebuild_mempool(self.store.mempool_txs())
         self.network_node: LibP2PNode | None = None
+        self._fruit_dag_cache: BlockDAG | None = None
         self._running = False
         self._stop_event = asyncio.Event()
 
@@ -404,6 +407,7 @@ class TensorPowNode:
                 deletes=state_batch.deletes,
             )
             self.store.write_batch(batch)
+            self._invalidate_fruit_dag_cache()
             confirmed_tx_ids = {confirmed.tx_id() for confirmed in txs}
             self.mempool = self._rebuild_mempool(
                 tuple(tx for tx in self.store.mempool_txs() if tx.tx_id() not in confirmed_tx_ids)
@@ -499,7 +503,10 @@ class TensorPowNode:
                 return "wrong_genesis"
             return None
 
-        history = self._anchor_history(anchor.header.parent_anchor)
+        history = self._anchor_history(
+            anchor.header.parent_anchor,
+            limit=ANCHOR_HISTORY_LOOKBACK,
+        )
         if history is None:
             return "missing_anchor_parent"
         if history and anchor.header.timestamp_ms <= history[-1].timestamp_ms:
@@ -573,15 +580,23 @@ class TensorPowNode:
         is_genesis_anchor = anchor.genesis_commitment != bytes(HASH_LEN_BYTES)
         if is_genesis_anchor:
             return 0, ANCHOR_INITIAL_TARGET_LE, 0
-        history = self._anchor_history(anchor.header.parent_anchor)
-        if history is None:
-            return None, None, None
         parent_meta = self._anchor_meta(anchor.header.parent_anchor)
         if parent_meta is None:
             return None, None, None
-        return len(history), next_anchor_target(history), parent_meta.cumulative_work
+        history = self._anchor_history(
+            anchor.header.parent_anchor,
+            limit=ANCHOR_HISTORY_LOOKBACK,
+        )
+        if history is None:
+            return None, None, None
+        return parent_meta.height + 1, next_anchor_target(history), parent_meta.cumulative_work
 
-    def _anchor_history(self, tip_hash: bytes) -> tuple[AnchorRecord, ...] | None:
+    def _anchor_history(
+        self,
+        tip_hash: bytes,
+        *,
+        limit: int | None = None,
+    ) -> tuple[AnchorRecord, ...] | None:
         if tip_hash == GENESIS_PARENT_HASH:
             return None
         chain: list[tuple[bytes, Anchor]] = []
@@ -595,22 +610,22 @@ class TensorPowNode:
             if anchor is None:
                 return None
             chain.append((current_hash, anchor))
+            if limit is not None and len(chain) >= limit:
+                break
             current_hash = anchor.header.parent_anchor
 
         history: list[AnchorRecord] = []
         for anchor_hash, anchor in reversed(chain):
-            target = (
-                ANCHOR_INITIAL_TARGET_LE
-                if anchor.genesis_commitment != bytes(HASH_LEN_BYTES)
-                else next_anchor_target(tuple(history))
-            )
+            meta = self._anchor_meta(anchor_hash)
+            if meta is None:
+                return None
             try:
                 history.append(
                     AnchorRecord(
                         anchor_hash=anchor_hash,
                         parent_anchor=anchor.header.parent_anchor,
                         timestamp_ms=anchor.header.timestamp_ms,
-                        target=target,
+                        target=meta.target,
                     )
                 )
             except (TypeError, ValueError):
@@ -639,33 +654,21 @@ class TensorPowNode:
         if chain_hashes is None:
             return None
         state = _empty_anchor_branch_state()
-        history: list[AnchorRecord] = []
         for anchor_hash in chain_hashes:
             anchor = self._load_anchor(anchor_hash)
             if anchor is None:
                 return None
-            is_genesis_anchor = anchor.genesis_commitment != bytes(HASH_LEN_BYTES)
-            anchor_height = 0 if is_genesis_anchor else len(history)
-            target = ANCHOR_INITIAL_TARGET_LE if is_genesis_anchor else next_anchor_target(history)
+            meta = self._anchor_meta(anchor_hash)
+            if meta is None:
+                return None
             apply_result = self._apply_anchor_to_branch(
                 anchor,
                 anchor_hash=anchor_hash,
-                anchor_height=anchor_height,
-                anchor_target=target,
+                anchor_height=meta.height,
+                anchor_target=meta.target,
                 state=state,
             )
             if apply_result is not None:
-                return None
-            try:
-                history.append(
-                    AnchorRecord(
-                        anchor_hash=anchor_hash,
-                        parent_anchor=anchor.header.parent_anchor,
-                        timestamp_ms=anchor.header.timestamp_ms,
-                        target=target,
-                    )
-                )
-            except (TypeError, ValueError):
                 return None
         return state
 
@@ -914,7 +917,7 @@ class TensorPowNode:
         dag = self._fruit_dag()
         if dag is None:
             return None
-        metadata = dag.ghostdag_metadata(DYNAMIC_K_MIN)
+        metadata = dag.ghostdag_metadata(self._ghostdag_k())
         covered = set(anchor.covered_fruit_hashes)
         if not covered.issubset(metadata):
             return None
@@ -947,7 +950,7 @@ class TensorPowNode:
                 return None
             referenced.update(parents)
         frontier = set(fruit_hashes) - referenced
-        metadata = dag.ghostdag_metadata(DYNAMIC_K_MIN)
+        metadata = dag.ghostdag_metadata(self._ghostdag_k())
         return tuple(
             sorted(
                 frontier,
@@ -956,6 +959,9 @@ class TensorPowNode:
         )
 
     def _fruit_dag(self) -> BlockDAG | None:
+        if self._fruit_dag_cache is not None:
+            return self._fruit_dag_cache
+
         fruits: dict[bytes, Fruit] = {}
         for fruit_hash in self._stored_fruit_hashes():
             fruit = self._load_fruit(fruit_hash)
@@ -998,7 +1004,14 @@ class TensorPowNode:
         for fruit_hash in sorted(fruits, key=lambda item: (fruits[item].header.timestamp_ms, item)):
             if not add_fruit(fruit_hash):
                 return None
+        self._fruit_dag_cache = dag
         return dag
+
+    def _invalidate_fruit_dag_cache(self) -> None:
+        self._fruit_dag_cache = None
+
+    def _ghostdag_k(self) -> int:
+        return DYNAMIC_K_MIN
 
     def _stored_fruit_hashes(self) -> tuple[bytes, ...]:
         fruit_hashes: list[bytes] = []
@@ -1010,7 +1023,7 @@ class TensorPowNode:
     def _best_fruit_tip(self, dag: BlockDAG) -> bytes | None:
         if len(dag) == 0:
             return None
-        metadata = dag.ghostdag_metadata(DYNAMIC_K_MIN)
+        metadata = dag.ghostdag_metadata(self._ghostdag_k())
         return sorted(
             metadata,
             key=lambda fruit_hash: (
@@ -1159,10 +1172,31 @@ class TensorPowNode:
         return self._derive_anchor_meta(anchor_hash)
 
     def _derive_anchor_meta(self, anchor_hash: bytes) -> _AnchorMeta | None:
-        history = self._anchor_history(anchor_hash)
-        if not history:
+        chain_hashes = self._anchor_chain_hashes(anchor_hash)
+        if not chain_hashes:
             return None
-        cumulative_work = sum(anchor_work_weight(record.target) for record in history)
+        history: list[AnchorRecord] = []
+        cumulative_work = 0
+        for chain_hash in chain_hashes:
+            anchor = self._load_anchor(chain_hash)
+            if anchor is None:
+                return None
+            target = (
+                ANCHOR_INITIAL_TARGET_LE
+                if anchor.genesis_commitment != bytes(HASH_LEN_BYTES)
+                else next_anchor_target(history)
+            )
+            try:
+                record = AnchorRecord(
+                    anchor_hash=chain_hash,
+                    parent_anchor=anchor.header.parent_anchor,
+                    timestamp_ms=anchor.header.timestamp_ms,
+                    target=target,
+                )
+            except (TypeError, ValueError):
+                return None
+            history.append(record)
+            cumulative_work += anchor_work_weight(record.target)
         return _AnchorMeta(
             height=len(history) - 1,
             target=history[-1].target,
@@ -1198,6 +1232,7 @@ class TensorPowNode:
                     BatchDelete(column, key) for key in target_items if key not in source_items
                 )
             self.store.write_batch(StorageBatch(puts=tuple(puts), deletes=tuple(deletes)))
+            self._invalidate_fruit_dag_cache()
             self.shard_tree = self.store.get_shard_tree() or ShardTree()
             self.utxo_set = UTXOSet(self.store.utxos())
             self.mempool = self._rebuild_mempool(self.store.mempool_txs())
@@ -1232,7 +1267,16 @@ class TensorPowNode:
             if dag is None or not dag.has_block(block_hash):
                 return _finality_result(block_hash, seen=True)
             tip = self._best_fruit_tip(dag)
-            blue_depth_value = 0 if tip is None else blue_depth(dag, block_hash, tip, DYNAMIC_K_MIN)
+            blue_depth_value = (
+                0
+                if tip is None
+                else blue_depth(
+                    dag,
+                    block_hash,
+                    tip,
+                    self._ghostdag_k(),
+                )
+            )
             covering_height = _decode_optional_u64(
                 self.store.get(COLUMN_DAG, _fruit_coinbase_claimed_key(block_hash))
             )
