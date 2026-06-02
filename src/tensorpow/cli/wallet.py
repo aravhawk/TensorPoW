@@ -7,7 +7,7 @@ import json
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 from tensorpow.tx import Transaction
 from tensorpow.wallet import (
@@ -19,6 +19,8 @@ from tensorpow.wallet import (
 )
 
 type _Command = Callable[[argparse.Namespace], int]
+
+DEFAULT_SEND_FEE_MATOMS: Final[int] = 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -57,7 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
     send.add_argument("--utxos", type=Path, required=True)
     send.add_argument("--to", required=True)
     send.add_argument("--amount", type=int, required=True)
-    send.add_argument("--fee", type=int, default=0)
+    send.add_argument("--fee", type=int, default=DEFAULT_SEND_FEE_MATOMS)
     send.add_argument("--change-address")
     send.add_argument("--out", type=Path)
     send.set_defaults(handler=_cmd_send)

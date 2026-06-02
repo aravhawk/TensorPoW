@@ -8,8 +8,10 @@ from typing import Any
 
 from tensorpow.cli.mine import main as mine_main
 from tensorpow.cli.node import main as node_main
+from tensorpow.cli.wallet import DEFAULT_SEND_FEE_MATOMS
 from tensorpow.cli.wallet import main as wallet_main
 from tensorpow.state.utxo import TEMPLATE_PKH, UTXO, Outpoint
+from tensorpow.tx.transaction import Transaction
 from tensorpow.wallet import Wallet, utxos_to_json
 
 
@@ -90,6 +92,29 @@ def test_wallet_cli_create_address_export_import_balance_and_send(
     sent = _read_stdout(capsys)
     assert len(sent["tx_id"]) == 64
     assert len(sent["tx"]) > 64
+
+    assert (
+        wallet_main(
+            [
+                "send",
+                "--wallet",
+                str(wallet_path),
+                "--password",
+                "pw",
+                "--utxos",
+                str(utxo_path),
+                "--to",
+                recipient.address,
+                "--amount",
+                "20",
+            ]
+        )
+        == 0
+    )
+    default_fee_tx = Transaction.from_bytes(bytes.fromhex(str(_read_stdout(capsys)["tx"])))
+    assert utxo.amount_matoms - sum(output.amount_matoms for output in default_fee_tx.outputs) == (
+        DEFAULT_SEND_FEE_MATOMS
+    )
 
 
 def test_node_cli_init_start_status_peers_stop(tmp_path: Path, capsys: object) -> None:
