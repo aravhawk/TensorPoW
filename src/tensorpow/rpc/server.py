@@ -92,6 +92,7 @@ class Subscription:
 
 @dataclass(frozen=True, slots=True)
 class _WebSocketFrame:
+    fin: bool
     opcode: int
     payload: bytes
 
@@ -802,6 +803,8 @@ class _RpcHttpHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
+        fragmented_opcode: int | None = None
+        fragmented_payload = bytearray()
         while True:
             try:
                 frame = _read_websocket_frame(
@@ -825,7 +828,49 @@ class _RpcHttpHandler(BaseHTTPRequestHandler):
                 continue
             if frame.opcode == WS_OPCODE_PONG:
                 continue
-            if frame.opcode not in (WS_OPCODE_TEXT, WS_OPCODE_BINARY):
+            if frame.opcode == WS_OPCODE_CONTINUATION:
+                if fragmented_opcode is None:
+                    _write_websocket_frame(
+                        self.connection,
+                        WS_OPCODE_CLOSE,
+                        _websocket_close_payload(WS_CLOSE_PROTOCOL_ERROR, "unexpected fragment"),
+                    )
+                    return
+                fragmented_payload.extend(frame.payload)
+                if len(fragmented_payload) > rpc_http_server.max_body_bytes:
+                    _write_websocket_frame(
+                        self.connection,
+                        WS_OPCODE_CLOSE,
+                        _websocket_close_payload(WS_CLOSE_PROTOCOL_ERROR, "message too large"),
+                    )
+                    return
+                if not frame.fin:
+                    continue
+                message_payload = bytes(fragmented_payload)
+                fragmented_opcode = None
+                fragmented_payload.clear()
+            elif frame.opcode in (WS_OPCODE_TEXT, WS_OPCODE_BINARY):
+                if fragmented_opcode is not None:
+                    _write_websocket_frame(
+                        self.connection,
+                        WS_OPCODE_CLOSE,
+                        _websocket_close_payload(WS_CLOSE_PROTOCOL_ERROR, "nested fragment"),
+                    )
+                    return
+                if frame.fin:
+                    message_payload = frame.payload
+                else:
+                    fragmented_opcode = frame.opcode
+                    fragmented_payload = bytearray(frame.payload)
+                    if len(fragmented_payload) > rpc_http_server.max_body_bytes:
+                        _write_websocket_frame(
+                            self.connection,
+                            WS_OPCODE_CLOSE,
+                            _websocket_close_payload(WS_CLOSE_PROTOCOL_ERROR, "message too large"),
+                        )
+                        return
+                    continue
+            else:
                 _write_websocket_frame(
                     self.connection,
                     WS_OPCODE_CLOSE,
@@ -833,7 +878,7 @@ class _RpcHttpHandler(BaseHTTPRequestHandler):
                 )
                 return
 
-            response = rpc_http_server.rpc_server.handle_json(frame.payload)
+            response = rpc_http_server.rpc_server.handle_json(message_payload)
             if response is not None:
                 _write_websocket_frame(self.connection, WS_OPCODE_TEXT, response)
 
@@ -1542,9 +1587,9 @@ def _read_websocket_frame(sock: socket.socket, *, max_payload_bytes: int) -> _We
     opcode = first & 0x0F
     masked = bool(second & 0x80)
     length = second & 0x7F
-    if rsv or not fin or not masked or opcode == WS_OPCODE_CONTINUATION:
+    if rsv or not masked:
         raise JsonRpcError(INVALID_REQUEST, "Invalid WebSocket frame")
-    if opcode in (WS_OPCODE_CLOSE, WS_OPCODE_PING, WS_OPCODE_PONG) and length > 125:
+    if opcode in (WS_OPCODE_CLOSE, WS_OPCODE_PING, WS_OPCODE_PONG) and (not fin or length > 125):
         raise JsonRpcError(INVALID_REQUEST, "Invalid WebSocket control frame")
     if length == 126:
         extended = _read_exact(sock, 2)
@@ -1567,7 +1612,7 @@ def _read_websocket_frame(sock: socket.socket, *, max_payload_bytes: int) -> _We
     if mask is None or payload is None:
         return None
     unmasked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
-    return _WebSocketFrame(opcode=opcode, payload=unmasked)
+    return _WebSocketFrame(fin=fin, opcode=opcode, payload=unmasked)
 
 
 def _write_websocket_frame(sock: socket.socket, opcode: int, payload: bytes) -> None:

@@ -119,6 +119,22 @@ def test_websocket_idle_read_deadline_closes_connection() -> None:
         thread.join(timeout=5)
 
 
+def test_websocket_accepts_fragmented_json_rpc_message() -> None:
+    httpd, thread, port = _start_server(request_timeout_seconds=5.0)
+    try:
+        response = _websocket_fragmented_rpc(
+            port,
+            {"jsonrpc": "2.0", "method": "getshardtree", "id": "fragmented"},
+        )
+
+        assert response["id"] == "fragmented"
+        assert response["result"]["leaf_shard_ids"] == [0]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
 def test_http_server_enforces_connection_cap() -> None:
     httpd = create_http_server(
         rpc_server=JsonRpcServer(InMemoryRpcBackend()),
@@ -198,6 +214,21 @@ def _websocket_rpc(port: int, request: dict[str, object]) -> dict[str, object]:
     return response  # type: ignore[no-any-return]
 
 
+def _websocket_fragmented_rpc(port: int, request: dict[str, object]) -> dict[str, object]:
+    payload = json.dumps(request).encode("utf-8")
+    split_at = max(1, len(payload) // 2)
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        _websocket_handshake(sock, port)
+        _send_ws_frame(sock, payload[:split_at], opcode=0x1, fin=False)
+        _send_ws_frame(sock, payload[split_at:], opcode=0x0)
+        opcode, response_payload = _read_ws_frame(sock)
+        _send_ws_frame(sock, b"", opcode=0x8)
+    assert opcode == 0x1
+    response = json.loads(response_payload)
+    assert isinstance(response, dict)
+    return response  # type: ignore[no-any-return]
+
+
 def _websocket_unmasked_protocol_error(port: int) -> tuple[int, bytes]:
     with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
         _websocket_handshake(sock, port)
@@ -233,15 +264,22 @@ def _websocket_handshake(sock: socket.socket, port: int) -> None:
     assert b"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" in response
 
 
-def _send_ws_frame(sock: socket.socket, payload: bytes, *, opcode: int = 0x1) -> None:
+def _send_ws_frame(
+    sock: socket.socket,
+    payload: bytes,
+    *,
+    opcode: int = 0x1,
+    fin: bool = True,
+) -> None:
     mask = os.urandom(4)
     length = len(payload)
+    first = (0x80 if fin else 0x00) | opcode
     if length <= 125:
-        header = bytes((0x80 | opcode, 0x80 | length))
+        header = bytes((first, 0x80 | length))
     elif length <= 0xFFFF:
-        header = bytes((0x80 | opcode, 0x80 | 126)) + length.to_bytes(2, "big")
+        header = bytes((first, 0x80 | 126)) + length.to_bytes(2, "big")
     else:
-        header = bytes((0x80 | opcode, 0x80 | 127)) + length.to_bytes(8, "big")
+        header = bytes((first, 0x80 | 127)) + length.to_bytes(8, "big")
     masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
     sock.sendall(header + mask + masked)
 
