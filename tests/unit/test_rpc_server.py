@@ -24,7 +24,7 @@ from tensorpow.rpc.server import (
 )
 from tensorpow.state import TEMPLATE_PKH, UTXO, Outpoint, UTXOSet
 from tensorpow.tx.script import pubkey_hash
-from tensorpow.tx.transaction import FORMAT_EPOCH, Input, Output, Transaction
+from tensorpow.tx.transaction import FORMAT_EPOCH, MAX_TX_BYTES, Input, Output, Transaction
 
 PUB1 = bytes.fromhex("343010a1aba8774dd1e6f4f0c3349bae6824908a1e64cd638dc2ed1bc625af1d")
 PRIV1 = bytes.fromhex("cd4f7f79a2b8168f5cbeccb55d415492fd3504e52ed4fe7b02ea404fede9a40b")
@@ -105,6 +105,20 @@ def test_subscriptions_are_capped_bounded_and_unsubscribable() -> None:
                     "method": "subscribe",
                     "params": {"topic": "tensorpow/fruits/main"},
                     "id": "third",
+                },
+            )
+        )
+        == INVALID_PARAMS
+    )
+    assert (
+        _error_code(
+            _handle(
+                server,
+                {
+                    "jsonrpc": "2.0",
+                    "method": "sendrawtx",
+                    "params": {"rawtx": "00" * (MAX_TX_BYTES + 1)},
+                    "id": 1,
                 },
             )
         )
@@ -363,6 +377,25 @@ def test_structural_node_adapter_uses_node_methods() -> None:
     assert sent == {"accepted": True, "txid": tx.tx_id().hex()}
 
 
+def test_structural_node_adapter_normalizes_sendrawtx_dicts() -> None:
+    server = JsonRpcServer(_FakeDictNode())
+    sent = _rpc(server, "sendrawtx", {"rawtx": "00"})
+
+    assert sent == {
+        "accepted": True,
+        "txid": bytes([1] * 32).hex(),
+        "shard_id": ROOT_SHARD_ID,
+        "fee_matoms": 3,
+        "fee_rate_matoms_per_kb": 4,
+    }
+
+    bad = _handle(
+        JsonRpcServer(_FakeDictNode(accepted="yes")),
+        {"jsonrpc": "2.0", "method": "sendrawtx", "params": {"rawtx": "00"}, "id": 1},
+    )
+    assert _error_code(bad) == INTERNAL_ERROR
+
+
 @dataclass(slots=True)
 class _FakeNodeResult:
     accepted: bool
@@ -385,6 +418,21 @@ class _FakeNode:
     def process_raw_tx(self, data: bytes) -> tuple[_FakeNodeResult, None]:
         tx = Transaction.from_bytes(data)
         return _FakeNodeResult(True, object_hash=tx.tx_id()), None
+
+
+class _FakeDictNode:
+    def __init__(self, *, accepted: object = True) -> None:
+        self.accepted = accepted
+
+    def process_raw_tx(self, data: bytes) -> dict[str, object]:
+        return {
+            "accepted": self.accepted,
+            "txid": bytes([1] * 32).hex(),
+            "shard_id": ROOT_SHARD_ID,
+            "fee_matoms": 3,
+            "fee_rate_matoms_per_kb": 4,
+            "extra": "dropped",
+        }
 
 
 def _rpc(

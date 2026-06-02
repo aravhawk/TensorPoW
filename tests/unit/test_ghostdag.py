@@ -8,6 +8,7 @@ import pytest
 
 from tensorpow.consensus.ghostdag import (
     DYNAMIC_K_OBSERVATION_ANCHORS,
+    U64_MAX,
     BlockDAG,
     FruitBlock,
     blue_set,
@@ -98,6 +99,18 @@ def test_merge_prefers_more_accumulated_blue_work_before_hash_tie() -> None:
     dag.add_fruit(_h(3), (_h(1), _h(2)), timestamp_ms=2)
 
     assert dag.ghostdag_data(_h(3), 15).selected_parent == _h(2)
+
+
+def test_accumulated_blue_work_saturates_at_uint64() -> None:
+    dag = BlockDAG()
+    dag.add_fruit(_h(1), timestamp_ms=1, work=U64_MAX)
+    dag.add_fruit(_h(2), (_h(1),), timestamp_ms=2, work=1)
+
+    assert dag.ghostdag_data(_h(2), 15).accumulated_blue_work == U64_MAX
+    with pytest.raises(ValueError, match="uint64"):
+        dag.add_fruit(_h(3), (_h(2),), timestamp_ms=3, work=U64_MAX + 1)
+    with pytest.raises(TypeError):
+        dag.add_fruit(_h(3), (_h(2),), timestamp_ms=3, work=True)  # type: ignore[arg-type]
 
 
 def test_adversarial_withheld_branch_is_red_when_anticone_exceeds_k() -> None:

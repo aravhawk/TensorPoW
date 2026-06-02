@@ -34,6 +34,7 @@ UTXO_DIFF_FIXED_BYTES: Final[int] = UTXO_DIFF_HEADER_BYTES + HASH_LEN_BYTES
 UTXO_DIFF_REMOVE_ENTRY_BYTES: Final[int] = OUTPOINT_BYTES + HASH_LEN_BYTES
 UTXO_DIFF_ADD_ENTRY_OVERHEAD_BYTES: Final[int] = U16_BYTES
 MAX_UTXO_DIFF_ENTRIES: Final[int] = 16_384
+MAX_UTXO_DIFF_IBLT_ENTRIES: Final[int] = (U16_MAX - UTXO_IBLT_HASH_COUNT) // 2
 MAX_UTXO_DIFF_BYTES: Final[int] = 64 * 1024 * 1024
 MAX_UTXO_DIFF_ADD_BYTES: Final[int] = UTXO_FIXED_BYTES + TX_OUTPUT_PAYLOAD_MAX_BYTES
 _UTXO_IBLT_POSITION_DOMAIN: Final[bytes] = b"TensorPoW UTXO IBLT position"
@@ -91,8 +92,7 @@ def build_utxo_diff(
 
     _require_utxo_set("local_set", local_set)
     _require_utxo_set("target_set", target_set)
-    _require_positive_int("max_entries", max_entries)
-    _require_positive_int("max_bytes", max_bytes)
+    _require_diff_limits(max_entries=max_entries, max_bytes=max_bytes)
 
     local_by_outpoint = _utxos_by_outpoint(local_set)
     target_by_outpoint = _utxos_by_outpoint(target_set)
@@ -133,15 +133,22 @@ def build_utxo_diff(
         )
 
 
-def request_utxo_diff(local_root: bytes, peer: UTXODiffPeer) -> bytes:
+def request_utxo_diff(
+    local_root: bytes,
+    peer: UTXODiffPeer,
+    *,
+    max_entries: int = MAX_UTXO_DIFF_ENTRIES,
+    max_bytes: int = MAX_UTXO_DIFF_BYTES,
+) -> bytes:
     """Request and preflight-check a peer diff for the caller's current UTXO root."""
 
     _require_hash("local_root", local_root)
+    _require_diff_limits(max_entries=max_entries, max_bytes=max_bytes)
     if not isinstance(peer, UTXODiffPeer):
         raise TypeError("peer must implement build_utxo_diff(local_root)")
 
     diff = peer.build_utxo_diff(local_root)
-    decoded = _decode_utxo_diff(diff)
+    decoded = _decode_utxo_diff(diff, max_entries=max_entries, max_bytes=max_bytes)
     if decoded.base_root != local_root:
         raise UTXOReconciliationError("peer diff base root does not match requested root")
     return diff
@@ -157,8 +164,7 @@ def apply_utxo_diff(
     """Apply a canonical UTXO reconciliation diff and validate the resulting root."""
 
     _require_utxo_set("local_set", local_set)
-    _require_positive_int("max_entries", max_entries)
-    _require_positive_int("max_bytes", max_bytes)
+    _require_diff_limits(max_entries=max_entries, max_bytes=max_bytes)
     decoded = _decode_utxo_diff(diff, max_entries=max_entries, max_bytes=max_bytes)
 
     if local_set.merkle_root() != decoded.base_root:
@@ -275,8 +281,7 @@ def _decode_utxo_diff(
     max_bytes: int = MAX_UTXO_DIFF_BYTES,
 ) -> _DecodedUTXODiff:
     _require_bytes("diff", diff)
-    _require_positive_int("max_entries", max_entries)
-    _require_positive_int("max_bytes", max_bytes)
+    _require_diff_limits(max_entries=max_entries, max_bytes=max_bytes)
     if len(diff) > max_bytes:
         raise UTXOReconciliationError("UTXO diff exceeds maximum encoded size")
     if len(diff) < UTXO_DIFF_FIXED_BYTES:
@@ -413,7 +418,10 @@ def _canonical_iblt_cell_count(change_count: int) -> int:
         raise TypeError("change_count must be int")
     if change_count < 0:
         raise ValueError("change_count must be nonnegative")
-    return max(UTXO_IBLT_MIN_CELLS, (change_count * 2) + UTXO_IBLT_HASH_COUNT)
+    cell_count = max(UTXO_IBLT_MIN_CELLS, (change_count * 2) + UTXO_IBLT_HASH_COUNT)
+    if cell_count > U16_MAX:
+        raise UTXOReconciliationError("UTXO diff IBLT cell count exceeds uint16")
+    return cell_count
 
 
 def _build_iblt(change_keys: tuple[bytes, ...], *, cell_count: int) -> tuple[_IBLTCell, ...]:
@@ -490,7 +498,7 @@ def _iblt_positions(key: bytes, cell_count: int) -> tuple[int, ...]:
             positions.append(position)
         attempt += 1
         if attempt > U16_MAX:
-            raise RuntimeError("unable to derive unique UTXO IBLT positions")
+            raise UTXOReconciliationError("unable to derive unique UTXO IBLT positions")
     return tuple(positions)
 
 
@@ -571,9 +579,17 @@ def _require_positive_int(name: str, value: int) -> None:
         raise ValueError(f"{name} must be positive")
 
 
+def _require_diff_limits(*, max_entries: int, max_bytes: int) -> None:
+    _require_positive_int("max_entries", max_entries)
+    _require_positive_int("max_bytes", max_bytes)
+    if max_entries > MAX_UTXO_DIFF_IBLT_ENTRIES:
+        raise ValueError("max_entries exceeds uint16 IBLT cell-count capacity")
+
+
 __all__ = [
     "MAX_UTXO_DIFF_BYTES",
     "MAX_UTXO_DIFF_ENTRIES",
+    "MAX_UTXO_DIFF_IBLT_ENTRIES",
     "UTXO_DIFF_FIXED_BYTES",
     "UTXO_DIFF_REMOVE_ENTRY_BYTES",
     "UTXO_IBLT_CELL_BYTES",

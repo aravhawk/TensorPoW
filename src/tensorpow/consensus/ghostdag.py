@@ -52,9 +52,8 @@ class FruitBlock:
         _require_hash("fruit_hash", self.fruit_hash)
         _require_hash_tuple("parents", self.parents)
         _require_u64("timestamp_ms", self.timestamp_ms)
-        if not isinstance(self.work, int):
-            raise TypeError("work must be int")
-        if self.work <= 0:
+        _require_u64("work", self.work)
+        if self.work == 0:
             raise ValueError("work must be positive")
 
 
@@ -207,7 +206,9 @@ class BlockDAG:
                 blues=blues,
                 reds=reds,
                 blue_score=len(blues),
-                accumulated_blue_work=sum(self._blocks[item].work for item in blues),
+                accumulated_blue_work=_saturating_blue_work(
+                    self._blocks[item].work for item in blues
+                ),
             )
 
         self._metadata_cache[k] = metadata
@@ -345,10 +346,19 @@ def _require_hash_tuple(name: str, value: tuple[FruitHash, ...]) -> None:
 
 
 def _require_u64(name: str, value: int) -> None:
-    if not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be int")
     if not 0 <= value <= U64_MAX:
         raise ValueError(f"{name} outside uint64 range")
+
+
+def _saturating_blue_work(values: Iterable[int]) -> int:
+    total = 0
+    for value in values:
+        total += value
+        if total >= U64_MAX:
+            return U64_MAX
+    return total
 
 
 def _require_k(k: int) -> None:

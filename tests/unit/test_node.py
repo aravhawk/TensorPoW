@@ -34,6 +34,7 @@ from tensorpow.mempool import ROOT_SHARD_ID, ShardTree
 from tensorpow.node import TensorPowConfig, TensorPowNode, write_default_config
 from tensorpow.pow.challenge import FORMAT_EPOCH, GENESIS_PARENT_HASH
 from tensorpow.state.utxo import MAX_SUPPLY_MATOMS, TEMPLATE_PKH, UTXO, Outpoint
+from tensorpow.storage import COLUMN_MEMPOOL
 from tensorpow.tx.transaction import Output, Transaction
 from tensorpow.wallet import Wallet
 
@@ -843,6 +844,38 @@ def test_raw_tx_persistence_failure_does_not_mutate_mempool(
         node.process_raw_tx(spend.to_bytes())
     assert node.status() == before_status
     assert node.get_tx(spend.tx_id()) is None
+    node.close()
+
+
+def test_rebuild_mempool_prunes_persisted_invalid_rows(tmp_path: Path) -> None:
+    node = _node(tmp_path / "node")
+    wallet = Wallet.recover("33" * 32)
+    recipient = Wallet.recover("44" * 32)
+    funded = UTXO(
+        outpoint=Outpoint(bytes.fromhex("fc" * 32), 0),
+        amount_matoms=10_000,
+        template_id=TEMPLATE_PKH,
+        owner_pubkey_hash=wallet.pubkey_hash(),
+        payload=wallet.pubkey_hash(),
+    )
+    spend = wallet.create_signed_transaction(
+        utxos=(funded,),
+        recipient_address=recipient.address,
+        amount_matoms=1_000,
+        fee_matoms=1,
+    )
+
+    node.utxo_set.add(funded)
+    accepted, add_result = node.process_raw_tx(spend.to_bytes())
+    assert accepted.accepted
+    assert add_result is not None and add_result.accepted
+    assert node.store.get(COLUMN_MEMPOOL, spend.tx_id()) is not None
+
+    node.utxo_set.remove(funded.outpoint)
+    node.mempool = node._rebuild_mempool(node.store.mempool_txs())
+
+    assert node.get_tx(spend.tx_id()) is None
+    assert node.store.get(COLUMN_MEMPOOL, spend.tx_id()) is None
     node.close()
 
 

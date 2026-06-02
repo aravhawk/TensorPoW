@@ -57,7 +57,10 @@ from tensorpow.genesis import (
 )
 from tensorpow.launch_policy import (
     GENESIS_BITCOIN_SELECTION_RULE,
+    GENESIS_BTC_CONFIRMATIONS,
     GENESIS_BTC_MIN_CONFIRMATIONS,
+    GENESIS_BTC_SELECTION_RULE,
+    GENESIS_ETH_SELECTION_RULE,
     GENESIS_ETHEREUM_SELECTION_RULE,
 )
 from tensorpow.pow.challenge import FORMAT_EPOCH, GENESIS_PARENT_HASH
@@ -120,6 +123,19 @@ def test_genesis_inputs_require_canonical_empty_state_roots() -> None:
         replace(inputs, initial_shard_tree_root=bytes.fromhex("66" * 32))
     with pytest.raises(GenesisError, match="initial_fee_floor_root"):
         replace(inputs, initial_fee_floor_root=bytes.fromhex("77" * 32))
+
+
+def test_launch_policy_exports_spec_names_and_founder_key_length() -> None:
+    public_key = bytes.fromhex("44" * 32)
+
+    assert GENESIS_BTC_CONFIRMATIONS == GENESIS_BTC_MIN_CONFIRMATIONS
+    assert GENESIS_BTC_SELECTION_RULE == GENESIS_BITCOIN_SELECTION_RULE
+    assert GENESIS_ETH_SELECTION_RULE == GENESIS_ETHEREUM_SELECTION_RULE
+    assert founder_pubkey_hash(public_key).hex() == (
+        "b1323aa4cbe6cee3ba3722ac18e26cc9f615d771ba412031fd8564e63efed7c1"
+    )
+    with pytest.raises(GenesisError, match="32 bytes"):
+        founder_pubkey_hash(public_key[:-1])
 
 
 def test_genesis_ceremony_cli_records_public_founder_material(tmp_path: Path) -> None:

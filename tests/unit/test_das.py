@@ -179,6 +179,13 @@ def test_das_wire_codecs_reject_malformed_payloads() -> None:
     with pytest.raises(ValueError, match="even DAS extended side"):
         decode_sample_response(prefix + (253).to_bytes(4, "little"))
 
+    bad_leaf_count = bytearray(response_bytes)
+    bad_leaf_count[12 + DAS_CELL_BYTES + 4 : 12 + DAS_CELL_BYTES + 8] = (
+        (DAS_MAX_DATA_SIDE * DAS_RS_EXTENSION_FACTOR) ** 2 + 1
+    ).to_bytes(4, "little")
+    with pytest.raises(ValueError, match="leaf_count"):
+        decode_sample_response(bytes(bad_leaf_count))
+
     with pytest.raises(ValueError, match="uint32"):
         DASSampleRequest(
             fruit_hash=hash_bytes(b"das-overflow"),

@@ -194,9 +194,34 @@ def _require_int8_matrix(
 
 def _int_mm(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
     int_mm = getattr(torch, "_int_mm", None)
-    if callable(int_mm):
+    if callable(int_mm) and _cpu_int_mm_available():
         return cast(torch.Tensor, int_mm(left, right))
     return left.to(torch.int32) @ right.to(torch.int32)
+
+
+@cache
+def _cpu_int_mm_available() -> bool:
+    int_mm = getattr(torch, "_int_mm", None)
+    if not callable(int_mm):
+        return False
+    left, right = _cpu_int_mm_probe_matrices()
+    try:
+        result = cast(torch.Tensor, int_mm(left, right))
+    except RuntimeError:
+        return False
+    reference = left.to(torch.int32) @ right.to(torch.int32)
+    return (
+        result.dtype == torch.int32
+        and tuple(result.shape) == tuple(reference.shape)
+        and torch.equal(result, reference)
+    )
+
+
+def _cpu_int_mm_probe_matrices() -> tuple[torch.Tensor, torch.Tensor]:
+    values = torch.arange(256, dtype=torch.int32).reshape(16, 16)
+    left = ((values * 17 + 13) % 256 - 128).to(torch.int8).contiguous()
+    right = ((values * 31 + 7) % 256 - 128).to(torch.int8).contiguous()
+    return left, right
 
 
 def _mps_int32_mm(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:

@@ -24,6 +24,7 @@ from tensorpow.crypto.hash import (
     domain_hash,
     hash_bytes,
 )
+from tensorpow.crypto.signatures import ED25519_PUBLIC_KEY_BYTES
 from tensorpow.mempool import ROOT_SHARD_ID, ShardTree
 from tensorpow.pow.challenge import FORMAT_EPOCH, GENESIS_PARENT_HASH
 from tensorpow.state import UTXOSet
@@ -187,8 +188,8 @@ class GenesisArtifact:
 def founder_pubkey_hash(public_key: bytes) -> bytes:
     """Return the Tensorcoin owner pubkey hash for a founder public key."""
 
-    if not isinstance(public_key, bytes) or len(public_key) != HASH_LEN_BYTES:
-        raise GenesisError(f"public_key must be {HASH_LEN_BYTES} bytes")
+    if not isinstance(public_key, bytes) or len(public_key) != ED25519_PUBLIC_KEY_BYTES:
+        raise GenesisError(f"public_key must be {ED25519_PUBLIC_KEY_BYTES} bytes")
     return domain_hash(DOMAIN_ADDRESS, public_key)
 
 

@@ -128,6 +128,27 @@ def test_dropout_count_uses_unprotected_candidate_pool() -> None:
     assert set(dropped).isdisjoint(protected)
 
 
+def test_simulation_accepts_max_fanout_and_reports_unavailable_payload() -> None:
+    seed = hash_bytes(b"turbine-sim-unavailable")
+    peers = _peers(32)
+    payload = _payload(8192)
+    tree = derive_relay_tree(seed, peers, max_fanout=2)
+    dropped = tuple(peer.peer_id for peer in peers if peer.peer_id != tree.root_peer_id)
+
+    result = simulate_propagation(
+        seed,
+        peers,
+        payload,
+        dropout_peer_ids=dropped,
+        max_fanout=2,
+    )
+
+    assert result.tree == tree
+    assert result.reached_peer_count == 1
+    assert result.available_chunk_count < TURBINE_DATA_SHARDS
+    assert result.reconstructed_payload == b""
+
+
 def _peers(count: int) -> tuple[TurbinePeer, ...]:
     peers = []
     for index in range(count):

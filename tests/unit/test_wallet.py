@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from tensorpow.crypto.signatures import SIG_TYPE_ED25519
 from tensorpow.state.utxo import MAX_SUPPLY_MATOMS, TEMPLATE_PKH, UTXO, Outpoint
 from tensorpow.tx.script import verify_utxo_spend
-from tensorpow.tx.transaction import Transaction
+from tensorpow.tx.transaction import FORMAT_EPOCH, Input, Output, Transaction
 from tensorpow.wallet import (
     SCRYPT_MAX_N,
     SCRYPT_MAX_P,
@@ -81,6 +82,35 @@ def test_wallet_builds_signed_pkh_transaction_and_change() -> None:
     assert len(tx.inputs[0].witness) == 96
     assert verify_utxo_spend(utxos[0], tx.inputs[0].witness, tx.sighash(0), sig_type=tx.sig_type)
     assert Transaction.from_bytes(tx.to_bytes()) == tx
+
+
+def test_wallet_signing_reuses_each_input_sighash(monkeypatch: pytest.MonkeyPatch) -> None:
+    wallet = Wallet.recover("11" * 32)
+    recipient = Wallet.recover("22" * 32)
+    unsigned = Transaction(
+        version=FORMAT_EPOCH,
+        sig_type=SIG_TYPE_ED25519,
+        locktime_ms=0,
+        lockheight=0,
+        inputs=(
+            Input(_owned_utxo(wallet, 40, 0).outpoint),
+            Input(_owned_utxo(wallet, 40, 1).outpoint),
+        ),
+        outputs=(Output(50, TEMPLATE_PKH, payload=recipient.pubkey_hash()),),
+    )
+    calls = 0
+    original_sighash = Transaction.sighash
+
+    def counting_sighash(tx: Transaction, input_index: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        return original_sighash(tx, input_index)
+
+    monkeypatch.setattr(Transaction, "sighash", counting_sighash)
+
+    wallet.sign_transaction(unsigned)
+
+    assert calls == len(unsigned.inputs)
 
 
 def test_wallet_balance_and_insufficient_funds() -> None:

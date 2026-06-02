@@ -119,3 +119,28 @@ def test_mps_probe_requires_exact_cpu_parity(monkeypatch: pytest.MonkeyPatch) ->
     kernel._mps_int32_mm_available.cache_clear()
     assert kernel._mps_int32_mm_available()
     kernel._mps_int32_mm_available.cache_clear()
+
+
+def test_cpu_private_int_mm_probe_requires_exact_parity(monkeypatch: pytest.MonkeyPatch) -> None:
+    left = torch.tensor([[1, -2], [3, 4]], dtype=torch.int8)
+    right = torch.tensor([[5, 6], [-7, 8]], dtype=torch.int8)
+    reference = left.to(torch.int32) @ right.to(torch.int32)
+
+    def mismatching_int_mm(probe_left: torch.Tensor, probe_right: torch.Tensor) -> torch.Tensor:
+        result = probe_left.to(torch.int32) @ probe_right.to(torch.int32)
+        result[0, 0] += 1
+        return result
+
+    def matching_int_mm(probe_left: torch.Tensor, probe_right: torch.Tensor) -> torch.Tensor:
+        return probe_left.to(torch.int32) @ probe_right.to(torch.int32)
+
+    monkeypatch.setattr(torch, "_int_mm", mismatching_int_mm, raising=False)
+    kernel._cpu_int_mm_available.cache_clear()
+    assert not kernel._cpu_int_mm_available()
+    assert torch.equal(kernel._int_mm(left, right), reference)
+
+    monkeypatch.setattr(torch, "_int_mm", matching_int_mm, raising=False)
+    kernel._cpu_int_mm_available.cache_clear()
+    assert kernel._cpu_int_mm_available()
+    assert torch.equal(kernel._int_mm(left, right), reference)
+    kernel._cpu_int_mm_available.cache_clear()

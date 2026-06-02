@@ -22,6 +22,7 @@ from tensorpow.consensus.finality import (
     satisfied_finality_tiers,
 )
 from tensorpow.consensus.ghostdag import (
+    DYNAMIC_K_OBSERVATION_ANCHORS,
     BlockDAG,
     FruitBlock,
     GhostdagData,
@@ -50,6 +51,7 @@ __all__ = [
     "ANCHOR_MAX_TARGET_LE",
     "ANCHOR_MIN_TARGET_LE",
     "COINBASE_MATURITY_ANCHORS",
+    "DYNAMIC_K_OBSERVATION_ANCHORS",
     "FRUIT_REWARD_WEIGHT",
     "FRUIT_TARGET_LE",
     "HALVING_INTERVAL_ANCHORS",

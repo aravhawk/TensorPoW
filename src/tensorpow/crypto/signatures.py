@@ -136,6 +136,8 @@ _SIG_DISPATCH: dict[int, _Verifier] = {
 def verify_by_sig_type(sig_type: int, message: bytes, signature: bytes, public_key: bytes) -> bool:
     """Verify signature through the protocol signature-type dispatch table."""
 
+    if isinstance(sig_type, bool):
+        raise TypeError("sig_type must be int, not bool")
     if not isinstance(sig_type, int):
         raise TypeError("sig_type must be int")
 

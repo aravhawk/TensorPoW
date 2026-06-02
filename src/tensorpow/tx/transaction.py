@@ -358,7 +358,7 @@ def _require_inputs(inputs: tuple[Input, ...]) -> None:
 def _require_outputs(outputs: tuple[Output, ...]) -> None:
     if not isinstance(outputs, tuple):
         raise TypeError("outputs must be a tuple")
-    if len(outputs) == COINBASE_INPUT_COUNT:
+    if len(outputs) == 0:
         raise ValueError("output_count must be nonzero")
     if len(outputs) > U16_MAX:
         raise ValueError("output_count outside uint range")

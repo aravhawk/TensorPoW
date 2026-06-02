@@ -280,13 +280,14 @@ class Wallet:
         base_tx = unsigned_tx.without_witnesses()
         signed_inputs = []
         for index, input_ in enumerate(base_tx.inputs):
-            signature = sign(base_tx.sighash(index), self.private_key)
+            sighash = base_tx.sighash(index)
+            signature = sign(sighash, self.private_key)
             witness = signature + self.public_key
             if not verify_template(
                 TEMPLATE_PKH,
                 self.owner_pubkey_hash,
                 witness,
-                base_tx.sighash(index),
+                sighash,
                 sig_type=base_tx.sig_type,
             ):
                 raise WalletError("wallet signature failed verification")

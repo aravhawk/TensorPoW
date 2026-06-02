@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from threading import Event
 from time import monotonic
 
+from tensorpow.crypto.hash import HASH_LEN_BYTES
 from tensorpow.pow.challenge import U64_MAX, PowHeader, with_nonce
 from tensorpow.pow.kernel import Backend, resolve_backend, target_allows_digest
 from tensorpow.pow.verify import pow_digest_for_header
@@ -45,6 +46,7 @@ def mine(
             raise TypeError("max_nonce must be int or None")
         if not start_nonce <= max_nonce <= U64_MAX:
             raise ValueError("max_nonce outside uint64 range or before start_nonce")
+    target_allows_digest(bytes(HASH_LEN_BYTES), target)
 
     nonce = start_nonce
     attempts = 0
@@ -57,8 +59,6 @@ def mine(
         header = with_nonce(template, nonce)
         digest = pow_digest_for_header(header, backend=resolved_backend)
         attempts += 1
-        if stop_event.is_set():
-            return None
         if target_allows_digest(digest, target):
             return FoundNonce(
                 header=header,
@@ -68,6 +68,8 @@ def mine(
                 elapsed_seconds=monotonic() - started,
                 backend=resolved_backend,
             )
+        if stop_event.is_set():
+            return None
         if nonce == U64_MAX:
             return None
         nonce += 1

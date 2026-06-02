@@ -374,6 +374,14 @@ class RocksDBStore:
         self.write_batch(batch)
         self.flush(sync=True)
         elapsed = perf_counter() - start
+        self.write_batch(
+            StorageBatch(
+                deletes=tuple(
+                    BatchDelete(COLUMN_DAG, key_prefix + index.to_bytes(U32_BYTES, "little"))
+                    for index in range(write_count)
+                )
+            )
+        )
         return WriteBenchmarkResult(
             writes=write_count,
             elapsed_seconds=elapsed,

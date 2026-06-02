@@ -5,13 +5,19 @@ from __future__ import annotations
 import pytest
 
 from tensorpow.crypto.hash import HASH_LEN_BYTES
-from tensorpow.mempool import ROOT_SHARD_ID, Mempool, child_shard_ids
+from tensorpow.mempool import ROOT_SHARD_ID, child_shard_ids
 from tensorpow.net.erlay import (
     CODEC_ERLAY,
     ERLAY_FIELD_BITS,
+    ERLAY_FIELD_MASK,
+    ERLAY_FIELD_POLY_LOW,
     ERLAY_INTERVAL_MS,
     ERLAY_MAX_DECODE_CAPACITY,
+    ERLAY_MAX_SPLIT_ATTEMPTS,
+    ERLAY_SESSION_PREFIX,
+    ERLAY_SHORT_ID_PREFIX,
     ERLAY_SKETCH_MAGIC,
+    ERLAY_SPLIT_SEED_STEP,
     ErlayPeerState,
     ErlaySetDifference,
     ErlaySketch,
@@ -26,10 +32,8 @@ def test_mostly_same_mempools_converge_with_diff_sized_payload() -> None:
     common = tuple(range(96))
     only_a = tuple(range(1000, 1004))
     only_b = tuple(range(2000, 2004))
-    mempool_a = _mempool((*common, *only_a))
-    mempool_b = _mempool((*common, *only_b))
-    tx_ids_a = set(_mempool_tx_ids(mempool_a))
-    tx_ids_b = set(_mempool_tx_ids(mempool_b))
+    tx_ids_a = set(_tx_ids((*common, *only_a)))
+    tx_ids_b = set(_tx_ids((*common, *only_b)))
     expected_union = tx_ids_a | tx_ids_b
     diff_count = len(tx_ids_a ^ tx_ids_b)
     state_a = ErlayPeerState(b"peer-a", b"peer-b")
@@ -142,6 +146,16 @@ def test_per_shard_separation_and_round_timing_are_independent() -> None:
     assert state.next_reconcile_at_ms(right) == 0
 
 
+def test_erlay_field_parameters_match_spec() -> None:
+    assert ERLAY_FIELD_BITS == 64
+    assert ERLAY_FIELD_MASK == (1 << 64) - 1
+    assert ERLAY_FIELD_POLY_LOW == 0x1B
+    assert ERLAY_SPLIT_SEED_STEP == 0x9E3779B97F4A7C15
+    assert ERLAY_MAX_SPLIT_ATTEMPTS == 512
+    assert ERLAY_SESSION_PREFIX == b"TensorPoW:Erlay:peer-session:"
+    assert ERLAY_SHORT_ID_PREFIX == b"TensorPoW:Erlay:short-id:"
+
+
 def test_duplicate_and_noncanonical_items_are_rejected() -> None:
     state = ErlayPeerState(b"peer-a", b"peer-b")
     tx_id = _tx(1).tx_id()
@@ -176,15 +190,8 @@ def _tx(seed: int) -> Transaction:
     )
 
 
-def _mempool(seeds: tuple[int, ...]) -> Mempool:
-    mempool = Mempool()
-    for seed in seeds:
-        assert mempool.add_tx(_tx(seed)).accepted
-    return mempool
-
-
-def _mempool_tx_ids(mempool: Mempool) -> tuple[bytes, ...]:
-    return tuple(tx.tx_id() for tx in mempool.select_for_fruit(ROOT_SHARD_ID))
+def _tx_ids(seeds: tuple[int, ...]) -> tuple[bytes, ...]:
+    return tuple(_tx(seed).tx_id() for seed in seeds)
 
 
 def _replace(data: bytes, offset: int, replacement: bytes) -> bytes:

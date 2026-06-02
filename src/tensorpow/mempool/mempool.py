@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final, Protocol
 
+from tensorpow.crypto.hash import HASH_LEN_BYTES
 from tensorpow.mempool.shard_tree import (
     MAX_FRUIT_PAYLOAD_BYTES,
     ShardId,
@@ -102,6 +103,21 @@ class MempoolEntry:
     fee_rate_matoms_per_kb: int
     is_coinbase: bool
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.tx, Transaction):
+            raise TypeError("tx must be Transaction")
+        _require_hash("tx_id", self.tx_id)
+        if self.tx.tx_id() != self.tx_id:
+            raise ValueError("tx_id must match tx")
+        require_shard_id(self.shard_id)
+        _require_positive_int("tx_size_bytes", self.tx_size_bytes)
+        if self.tx_size_bytes > MAX_TX_BYTES:
+            raise ValueError("tx_size_bytes exceeds MAX_TX_BYTES")
+        _require_nonnegative_int("fee_matoms", self.fee_matoms)
+        _require_nonnegative_int("fee_rate_matoms_per_kb", self.fee_rate_matoms_per_kb)
+        if not isinstance(self.is_coinbase, bool):
+            raise TypeError("is_coinbase must be bool")
+
 
 @dataclass(frozen=True, slots=True)
 class _SpendAssessment:
@@ -155,8 +171,6 @@ class Mempool:
             return MempoolAddResult.reject("malformed")
         tx, raw = decoded
         tx_size_bytes = len(raw)
-        if tx_size_bytes > MAX_TX_BYTES:
-            return MempoolAddResult.reject("too_large", tx_id=tx.tx_id())
 
         tx_id = tx.tx_id()
         routed_shard_id = self._shard_tree.route_tx(tx_id)
@@ -368,11 +382,7 @@ class Mempool:
         current_height: int,
     ) -> _SpendAssessment:
         if not tx.inputs:
-            return _SpendAssessment(
-                fee_matoms=0,
-                fee_rate_matoms_per_kb=0,
-                is_coinbase=True,
-            )
+            return _SpendAssessment(0, 0, False, "coinbase_not_relayable")
         if utxo_view is None:
             return _SpendAssessment(0, 0, False, "missing_utxo_view")
         try:
@@ -466,6 +476,13 @@ def _fee_rate_matoms_per_kb(fee_matoms: int, tx_size_bytes: int) -> int:
     fee_matoms = _require_nonnegative_int("fee_matoms", fee_matoms)
     tx_size_bytes = _require_positive_int("tx_size_bytes", tx_size_bytes)
     return fee_matoms * BYTES_PER_KB // tx_size_bytes
+
+
+def _require_hash(name: str, value: bytes) -> None:
+    if not isinstance(value, bytes):
+        raise TypeError(f"{name} must be bytes")
+    if len(value) != HASH_LEN_BYTES:
+        raise ValueError(f"{name} must be {HASH_LEN_BYTES} bytes")
 
 
 def _require_nonnegative_int(name: str, value: int) -> int:

@@ -80,6 +80,8 @@ def main() -> int:
 
     best_seconds = min(kernel_timings)
     best_full_attempt_seconds = min(full_attempt_timings)
+    if best_seconds <= 0 or best_full_attempt_seconds <= 0:
+        raise SystemExit("benchmark timer resolution produced a non-positive best timing")
     nonces_per_second_best = 1 / best_full_attempt_seconds
     dim = left.shape[0]
     ops = POW_OPS_PER_MATMUL

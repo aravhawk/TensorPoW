@@ -661,6 +661,8 @@ def _encode_merkle_proof(proof: DASMerkleProof) -> bytes:
 def _decode_merkle_proof(reader: _Reader) -> DASMerkleProof:
     leaf_index = reader.u32()
     leaf_count = reader.u32()
+    if leaf_count > _DAS_MAX_EXTENDED_SIDE * _DAS_MAX_EXTENDED_SIDE:
+        raise ValueError("DAS Merkle proof leaf_count exceeds extended grid limit")
     sibling_count = reader.u32()
     if sibling_count > _DAS_MAX_MERKLE_SIBLINGS:
         raise ValueError("DAS Merkle proof has too many siblings")

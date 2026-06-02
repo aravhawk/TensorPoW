@@ -18,7 +18,7 @@ from tensorpow.state.utxo import (
     TEMPLATE_PKH,
     UTXO,
 )
-from tensorpow.tx.transaction import TX_WITNESS_MAX_BYTES, U8_MAX, U16_BYTES, U64_MAX
+from tensorpow.tx.transaction import TX_WITNESS_MAX_BYTES, U8_MAX, U16_BYTES, U16_MAX, U64_MAX
 
 SCRIPT_MAX_BYTES: Final[int] = 1024
 SCRIPT_MAX_OPS: Final[int] = 256
@@ -404,12 +404,12 @@ def _read_push(script: bytes, offset: int) -> tuple[bytes, int]:
 def _initial_stack(initial_stack: tuple[bytes, ...]) -> list[bytes]:
     if not isinstance(initial_stack, tuple):
         raise TypeError("initial_stack must be a tuple")
-    stack = []
+    stack: list[bytes] = []
     for item in initial_stack:
+        if len(stack) >= SCRIPT_MAX_STACK_ITEMS:
+            raise ScriptError("stack exceeds max item count")
         _require_stack_item("stack item", item)
         stack.append(item)
-    if len(stack) > SCRIPT_MAX_STACK_ITEMS:
-        raise ScriptError("stack exceeds max item count")
     return stack
 
 
@@ -451,7 +451,7 @@ def _truthy(item: bytes) -> bool:
 
 
 def _require_template_id(template_id: int) -> None:
-    _require_u8("template_id", template_id)
+    _require_u16("template_id", template_id)
     if template_id not in (TEMPLATE_PKH, TEMPLATE_MULTISIG, TEMPLATE_HASHLOCK):
         raise ScriptError("template_id must be an active output template")
 
@@ -466,6 +466,13 @@ def _require_u8(name: str, value: int) -> None:
     if not isinstance(value, int) or isinstance(value, bool):
         raise TypeError(f"{name} must be int")
     if not 0 <= value <= U8_MAX:
+        raise ValueError(f"{name} outside uint range")
+
+
+def _require_u16(name: str, value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{name} must be int")
+    if not 0 <= value <= U16_MAX:
         raise ValueError(f"{name} outside uint range")
 
 

@@ -160,6 +160,15 @@ def test_script_vm_rejects_malformed_programs_and_stack_shapes() -> None:
         execute_script(encode_push(b"") * (SCRIPT_MAX_OPS + 1), context)
     with pytest.raises(ScriptError, match="stack"):
         execute_script(b"", context, initial_stack=(b"",) * (SCRIPT_MAX_STACK_ITEMS + 1))
+    with pytest.raises(ScriptError, match="stack"):
+        execute_script(
+            b"",
+            context,
+            initial_stack=(b"",) * SCRIPT_MAX_STACK_ITEMS
+            + (b"x" * (SCRIPT_MAX_ELEMENT_BYTES + 1),),
+        )
+    with pytest.raises(ScriptError, match="active output template"):
+        validate_template_payload(256, bytes(32))
     with pytest.raises(ScriptError, match="signature"):
         execute_script(
             encode_push(b"\x01") + bytes((OP_CHECKMULTISIG,)),

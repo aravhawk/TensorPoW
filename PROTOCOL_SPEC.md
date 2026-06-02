@@ -424,6 +424,9 @@ This two-pool split assigns any top-level remainder from the fruit/anchor split
 to `anchor_pool`. The fruit pool is then distributed over covered fruits by
 integer floor division; any fruit-pool remainder subunits are assigned by
 ascending `(reward_key, fruit_hash)`, one subunit at a time, until exhausted.
+`reward_key` is the canonical owner recipient hash committed by the fruit
+coinbase output: for the active `TEMPLATE_PKH` reward template this is the
+32-byte public-key hash payload.
 
 ---
 
@@ -593,7 +596,7 @@ Output layout:
 
 | Field | Type | Bytes | Validation |
 |---|---:|---:|---|
-| `amount_matoms` | `uint64` | `U64_BYTES` | Nonzero except explicitly allowed burn output. |
+| `amount_matoms` | `uint64` | `U64_BYTES` | MUST be nonzero. No burn output template is active in `FORMAT_EPOCH`. |
 | `template_id` | `uint16` | `U16_BYTES` | Known template. |
 | `locktime_ms` | `uint64` | `U64_BYTES` | Zero disabled. |
 | `lockheight` | `uint64` | `U64_BYTES` | Zero disabled. |
@@ -625,7 +628,9 @@ Active output templates:
   `[1, pubkey_count]`. Public keys MUST be distinct.
 - `TEMPLATE_HASHLOCK`: payload is `hash || inner_template_payload`. Witness
   MUST reveal a preimage whose BLAKE3 hash matches, then satisfy the inner
-  template.
+  template. The inner template is inferred by payload length: exactly
+  `HASH_LEN_BYTES` is `TEMPLATE_PKH`; otherwise the payload MUST decode as
+  `TEMPLATE_MULTISIG`.
 
 All fees are:
 
@@ -856,7 +861,12 @@ Codec registry:
 
 Graphene relay MUST fall back to full fruit request when reconstruction fails.
 Erlay sketches MUST reject malformed lengths and invalid field encodings before
-set reconciliation.
+set reconciliation. Erlay arithmetic is over GF(2^64) with reduction polynomial
+low byte `ERLAY_FIELD_POLY_LOW = 0x1b`, mask `ERLAY_FIELD_MASK = 2^64 - 1`,
+split seed step `ERLAY_SPLIT_SEED_STEP = 0x9e3779b97f4a7c15`, and at most
+`ERLAY_MAX_SPLIT_ATTEMPTS = 512`. Peer-session hashes use the byte prefix
+`TensorPoW:Erlay:peer-session:` and transaction short IDs use
+`TensorPoW:Erlay:short-id:`.
 
 ---
 
@@ -877,8 +887,10 @@ Rules:
   symbols, then extend every resulting column from `k` to `2k` symbols.
 - The maximum data matrix side is `DAS_MAX_DATA_SIDE`; payloads larger than
   `DAS_MAX_PAYLOAD_BYTES` are invalid for DAS encoding.
-- A light verifier samples `DAS_SAMPLES_PER_FRUIT` uniformly using
-  `BLAKE3(DOMAIN_DAS_SAMPLE || fruit_hash || sample_index_le)` as randomness.
+- A light verifier samples `DAS_SAMPLES_PER_FRUIT` uniformly using rejection
+  sampling over `BLAKE3(DOMAIN_DAS_SAMPLE || fruit_hash || sample_index_le ||
+  attempt_suffix)` as randomness, where `attempt_suffix` is empty for attempt
+  0 and `attempt_u32_le` for later attempts.
 - A fruit is considered available to a light verifier when at least
   `DAS_SAMPLE_SUCCESS_THRESHOLD_PCT` of requested samples are returned with
   valid Merkle and Reed-Solomon proofs.
@@ -899,7 +911,8 @@ Each Merkle proof is
 `leaf_index_u32_le || leaf_count_u32_le || sibling_count_u32_le ||
 repeated(is_left_u8 || sibling_hash[32])`, where `is_left_u8` is exactly `0` or
 `1`. Row and column witness counts MUST match, be nonzero, and fit the
-Reed-Solomon extended side limit.
+Reed-Solomon extended side limit. `leaf_count` MUST be nonzero and MUST NOT
+exceed `DAS_MAX_DATA_SIDE * DAS_RS_EXTENSION_FACTOR` squared.
 
 The DAS security regression suite MUST show detection probability greater than
 `DAS_WITHHOLDING_DETECTION_PCT` when an attacker withholds
@@ -1199,6 +1212,12 @@ roots.
 | `TOPIC_TXS_SUFFIX` | `/main` | Shard tx topic suffix. |
 | `RECOMMENDED_BANDWIDTH_BYTES_PER_SEC` | `10000000` | Operator bandwidth recommendation. |
 | `ERLAY_INTERVAL_MS` | `8000` | Erlay reconciliation interval. |
+| `ERLAY_FIELD_BITS` | `64` | Erlay GF field width. |
+| `ERLAY_FIELD_POLY_LOW` | `0x1b` | Erlay GF(2^64) reduction polynomial low byte. |
+| `ERLAY_SPLIT_SEED_STEP` | `0x9e3779b97f4a7c15` | Erlay split seed step. |
+| `ERLAY_MAX_SPLIT_ATTEMPTS` | `512` | Erlay split-search bound. |
+| `ERLAY_SESSION_PREFIX` | `TensorPoW:Erlay:peer-session:` | Erlay peer-session hash prefix. |
+| `ERLAY_SHORT_ID_PREFIX` | `TensorPoW:Erlay:short-id:` | Erlay transaction short-id hash prefix. |
 | `GRAPHENE_RECEIVER_MEMPOOL_PCT` | `99` | Compression acceptance scenario. |
 | `GRAPHENE_TARGET_COMPRESSION_PCT` | `95` | Expected compact-block compression. |
 | `GRAPHENE_BLOOM_BITS_PER_TX` | `2` | Graphene Bloom filter sizing factor. |

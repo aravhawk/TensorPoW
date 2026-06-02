@@ -29,13 +29,19 @@ ERLAY_SKETCH_HEADER_BYTES: Final[int] = (
 )
 ERLAY_TOPIC_TXS_PREFIX: Final[str] = "tensorpow/txs/"
 ERLAY_TOPIC_TXS_SUFFIX: Final[str] = "/main"
+ERLAY_FIELD_POLY_LOW: Final[int] = 0x1B
+ERLAY_FIELD_MASK: Final[int] = U64_MAX
+ERLAY_SPLIT_SEED_STEP: Final[int] = 0x9E3779B97F4A7C15
+ERLAY_MAX_SPLIT_ATTEMPTS: Final[int] = 512
+ERLAY_SESSION_PREFIX: Final[bytes] = b"TensorPoW:Erlay:peer-session:"
+ERLAY_SHORT_ID_PREFIX: Final[bytes] = b"TensorPoW:Erlay:short-id:"
 
-_FIELD_POLY_LOW: Final[int] = 0x1B
-_FIELD_MASK: Final[int] = U64_MAX
-_SPLIT_SEED_STEP: Final[int] = 0x9E3779B97F4A7C15
-_MAX_SPLIT_ATTEMPTS: Final[int] = 512
-_SESSION_PREFIX: Final[bytes] = b"TensorPoW:Erlay:peer-session:"
-_SHORT_ID_PREFIX: Final[bytes] = b"TensorPoW:Erlay:short-id:"
+_FIELD_POLY_LOW: Final[int] = ERLAY_FIELD_POLY_LOW
+_FIELD_MASK: Final[int] = ERLAY_FIELD_MASK
+_SPLIT_SEED_STEP: Final[int] = ERLAY_SPLIT_SEED_STEP
+_MAX_SPLIT_ATTEMPTS: Final[int] = ERLAY_MAX_SPLIT_ATTEMPTS
+_SESSION_PREFIX: Final[bytes] = ERLAY_SESSION_PREFIX
+_SHORT_ID_PREFIX: Final[bytes] = ERLAY_SHORT_ID_PREFIX
 
 
 class ErlaySketchError(ValueError):
@@ -801,11 +807,17 @@ __all__ = [
     "CODEC_ERLAY",
     "ERLAY_DEFAULT_CAPACITY",
     "ERLAY_FIELD_BITS",
+    "ERLAY_FIELD_MASK",
+    "ERLAY_FIELD_POLY_LOW",
     "ERLAY_INTERVAL_MS",
     "ERLAY_MAX_CAPACITY",
     "ERLAY_MAX_DECODE_CAPACITY",
+    "ERLAY_MAX_SPLIT_ATTEMPTS",
+    "ERLAY_SESSION_PREFIX",
+    "ERLAY_SHORT_ID_PREFIX",
     "ERLAY_SKETCH_HEADER_BYTES",
     "ERLAY_SKETCH_MAGIC",
+    "ERLAY_SPLIT_SEED_STEP",
     "ErlayPeerState",
     "ErlaySetDifference",
     "ErlaySketch",

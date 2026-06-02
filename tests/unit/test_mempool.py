@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tensorpow.crypto.signatures import sign
 from tensorpow.mempool import (
     FEE_FLOOR_WINDOW_FRUITS,
@@ -175,15 +177,41 @@ def test_rejects_unmatured_transaction_locktime_and_lockheight() -> None:
     assert mempool.add_tx(tx, current_time_ms=100, current_height=5).accepted
 
 
-def test_coinbase_bypasses_fee_floor_without_utxo_view() -> None:
+def test_coinbase_is_not_relayable_through_mempool() -> None:
     tx = Transaction.coinbase((Output(1, TEMPLATE_PKH, payload=PKH1),))
     mempool = Mempool()
     mempool.set_fee_floor(ROOT_SHARD_ID, 1_000_000)
 
     result = mempool.add_tx(tx)
 
-    assert result.accepted
-    assert mempool.select_for_fruit(ROOT_SHARD_ID) == [tx]
+    assert not result.accepted
+    assert result.reason == "coinbase_not_relayable"
+    assert mempool.select_for_fruit(ROOT_SHARD_ID) == []
+
+
+def test_mempool_entry_validates_metadata() -> None:
+    tx = _signed_tx(_utxo(11, amount=1_000), fee=100)
+
+    with pytest.raises(ValueError, match="tx_id"):
+        MempoolEntry(
+            tx=tx,
+            tx_id=bytes(32),
+            shard_id=ROOT_SHARD_ID,
+            tx_size_bytes=len(tx.to_bytes()),
+            fee_matoms=100,
+            fee_rate_matoms_per_kb=_fee_rate_matoms_per_kb(100, len(tx.to_bytes())),
+            is_coinbase=False,
+        )
+    with pytest.raises(TypeError, match="is_coinbase"):
+        MempoolEntry(
+            tx=tx,
+            tx_id=tx.tx_id(),
+            shard_id=ROOT_SHARD_ID,
+            tx_size_bytes=len(tx.to_bytes()),
+            fee_matoms=100,
+            fee_rate_matoms_per_kb=_fee_rate_matoms_per_kb(100, len(tx.to_bytes())),
+            is_coinbase=0,  # type: ignore[arg-type]
+        )
 
 
 def _outpoint(seed: int) -> Outpoint:
@@ -231,9 +259,10 @@ def _signed_tx(
 
 
 def _entry_for_selection(*, fee_matoms: int, tx_size_bytes: int, tx_id: bytes) -> MempoolEntry:
+    tx = _signed_tx(_utxo(tx_id[0], amount=1_000), fee=100)
     return MempoolEntry(
-        tx=_signed_tx(_utxo(tx_id[0], amount=1_000), fee=100),
-        tx_id=tx_id,
+        tx=tx,
+        tx_id=tx.tx_id(),
         shard_id=ROOT_SHARD_ID,
         tx_size_bytes=tx_size_bytes,
         fee_matoms=fee_matoms,

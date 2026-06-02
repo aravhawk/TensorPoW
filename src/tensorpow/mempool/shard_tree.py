@@ -6,8 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
-from tensorpow.chain.merkle import require_hash
-from tensorpow.crypto.hash import DOMAIN_SHARD_TREE, domain_hash
+from tensorpow.crypto.hash import DOMAIN_SHARD_TREE, HASH_LEN_BYTES, domain_hash
 
 ShardId = int
 
@@ -67,7 +66,7 @@ class ShardTree:
     def route_tx(self, tx_hash: bytes) -> ShardId:
         """Return the unique leaf shard selected by the low bits of a tx hash."""
 
-        require_hash("tx_hash", tx_hash)
+        _require_hash("tx_hash", tx_hash)
         route_int = int.from_bytes(tx_hash, "little")
         for shard_id in self.leaf_shard_ids:
             depth, path = decode_shard_id(shard_id)
@@ -422,6 +421,14 @@ def _require_uint(name: str, value: int) -> None:
 
 def _path_mask(depth: int) -> int:
     return (1 << depth) - 1
+
+
+def _require_hash(name: str, value: bytes) -> bytes:
+    if not isinstance(value, bytes):
+        raise TypeError(f"{name} must be bytes")
+    if len(value) != HASH_LEN_BYTES:
+        raise ValueError(f"{name} must be {HASH_LEN_BYTES} bytes")
+    return value
 
 
 def _u32(value: int) -> bytes:

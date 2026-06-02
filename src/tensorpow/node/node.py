@@ -1143,12 +1143,17 @@ class TensorPowNode:
             utxo_view=self.utxo_set,
             initial_fee_floors=self._stored_fee_floors(),
         )
+        stale_tx_ids: list[bytes] = []
         for tx in transactions:
-            mempool.add_tx(
+            result = mempool.add_tx(
                 tx,
                 utxo_view=self.utxo_set,
                 current_height=self._anchor_height(),
             )
+            if not result.accepted:
+                stale_tx_ids.append(tx.tx_id())
+        for tx_id in stale_tx_ids:
+            self.store.delete(COLUMN_MEMPOOL, tx_id)
         return mempool
 
     def _stored_fee_floors(self) -> dict[int, int]:

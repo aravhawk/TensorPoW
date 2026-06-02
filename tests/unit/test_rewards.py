@@ -59,6 +59,8 @@ def test_reward_pools_expose_anchor_claim_path() -> None:
         interval_subsidy=10_000,
         anchor_target=ANCHOR_INITIAL_TARGET_LE,
     ) == (0, 10_000)
+    with pytest.raises(ValueError, match="anchor_target"):
+        reward_pools(fruit_count=0, interval_subsidy=10_000, anchor_target=bytes(31))
 
 
 def test_reward_pools_route_top_level_remainder_to_anchor_pool() -> None:

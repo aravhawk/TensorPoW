@@ -227,6 +227,7 @@ def test_batched_write_benchmark_exceeds_10k_writes_per_second(tmp_path: Path) -
 
     assert result.writes == 10_000
     assert result.writes_per_second >= BENCHMARK_MIN_WRITES_PER_SEC
+    assert not any(key.startswith(b"bench:") for key, _value in store.items(COLUMN_DAG))
     store.close()
 
 

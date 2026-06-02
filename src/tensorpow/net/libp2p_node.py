@@ -6,7 +6,8 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any, Final
 
-from tensorpow.crypto.hash import HASH_LEN_BYTES, hash_bytes
+from tensorpow.crypto.hash import hash_bytes
+from tensorpow.crypto.signatures import ED25519_PRIVATE_KEY_BYTES
 from tensorpow.mempool.shard_tree import ShardId, require_shard_id
 
 WIRE_MAGIC: Final[bytes] = bytes.fromhex("54504f57")
@@ -72,8 +73,8 @@ class NodeIdentity:
     def __post_init__(self) -> None:
         if not isinstance(self.private_key_bytes, bytes):
             raise TypeError("private_key_bytes must be bytes")
-        if len(self.private_key_bytes) != HASH_LEN_BYTES:
-            raise ValueError(f"private_key_bytes must be {HASH_LEN_BYTES} bytes")
+        if len(self.private_key_bytes) != ED25519_PRIVATE_KEY_BYTES:
+            raise ValueError(f"private_key_bytes must be {ED25519_PRIVATE_KEY_BYTES} bytes")
 
     @classmethod
     def generate(cls) -> NodeIdentity:

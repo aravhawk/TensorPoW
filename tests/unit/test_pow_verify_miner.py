@@ -59,7 +59,9 @@ def test_mine_honors_pre_set_stop_event(monkeypatch: pytest.MonkeyPatch) -> None
     assert mine(_template(), bytes([0xFF]) * HASH_LEN_BYTES, stop_event, backend="cpu") is None
 
 
-def test_mine_honors_stop_event_after_expensive_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mine_returns_valid_nonce_when_stop_event_fires_during_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     stop_event = Event()
 
     def stop_during_attempt(*args: object, **kwargs: object) -> bytes:
@@ -68,7 +70,21 @@ def test_mine_honors_stop_event_after_expensive_attempt(monkeypatch: pytest.Monk
 
     monkeypatch.setattr("tensorpow.pow.miner.pow_digest_for_header", stop_during_attempt)
 
-    assert mine(_template(), bytes([0xFF]) * HASH_LEN_BYTES, stop_event, backend="cpu") is None
+    result = mine(_template(), bytes([0xFF]) * HASH_LEN_BYTES, stop_event, backend="cpu")
+
+    assert result is not None
+    assert result.nonce == 0
+    assert result.attempts == 1
+
+
+def test_mine_validates_target_before_expensive_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_if_called(*args: object, **kwargs: object) -> bytes:
+        raise AssertionError("miner should validate target before computing")
+
+    monkeypatch.setattr("tensorpow.pow.miner.pow_digest_for_header", fail_if_called)
+
+    with pytest.raises(ValueError, match="target"):
+        mine(_template(), bytes(HASH_LEN_BYTES - 1), Event(), backend="cpu", max_nonce=0)
 
 
 def test_mine_rejects_bad_bounds_and_does_not_wrap_uint64(

@@ -305,6 +305,7 @@ def simulate_propagation(
     payload: bytes,
     *,
     dropout_peer_ids: Sequence[bytes] = (),
+    max_fanout: int = TURBINE_MAX_FANOUT,
 ) -> TurbineSimulationResult:
     """Simulate Turbine propagation and erasure recovery over a relay tree."""
 
@@ -317,7 +318,7 @@ def simulate_propagation(
         _require_peer_id(peer_id)
 
     chunks = encode_payload(payload)
-    tree = derive_relay_tree(anchor_seed, peer_tuple)
+    tree = derive_relay_tree(anchor_seed, peer_tuple, max_fanout=max_fanout)
     arrival_by_peer = _arrival_times(tree, peer_by_id, len(chunks[0].data), dropout)
     live_reached = frozenset(arrival_by_peer)
     available_chunks = tuple(
@@ -328,7 +329,10 @@ def simulate_propagation(
             for custodian in _chunk_custodians(anchor_seed, peer_tuple, chunk.index)
         )
     )
-    reconstructed = decode_payload(available_chunks)
+    try:
+        reconstructed = decode_payload(available_chunks)
+    except ValueError:
+        reconstructed = b""
     return TurbineSimulationResult(
         latency_ms=max(arrival_by_peer.values(), default=0),
         reached_peer_count=len(arrival_by_peer),

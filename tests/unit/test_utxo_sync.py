@@ -233,6 +233,7 @@ def test_duplicate_or_unsorted_diff_records_are_non_canonical() -> None:
 def test_request_utxo_diff_checks_returned_base_root() -> None:
     local_set = _set((50, 51))
     target_set = _set((50, 51, 52))
+    oversized_target_set = _set((50, 51, 52, 53))
 
     class BadPeer:
         def build_utxo_diff(self, local_root: bytes) -> bytes:
@@ -241,6 +242,13 @@ def test_request_utxo_diff_checks_returned_base_root() -> None:
 
     with pytest.raises(UTXOReconciliationError, match="base root"):
         request_utxo_diff(local_set.merkle_root(), BadPeer())
+
+    with pytest.raises(UTXOReconciliationError, match="entry count"):
+        request_utxo_diff(
+            local_set.merkle_root(),
+            _Peer(local_set, oversized_target_set),
+            max_entries=1,
+        )
 
 
 def test_utxo_diff_rejects_conflicting_same_outpoint_and_limits() -> None:
@@ -255,6 +263,14 @@ def test_utxo_diff_rejects_conflicting_same_outpoint_and_limits() -> None:
         build_utxo_diff(UTXOSet(), UTXOSet([_utxo(1), _utxo(2)]), max_entries=1)
     with pytest.raises(UTXOReconciliationError, match="maximum encoded size"):
         build_utxo_diff(UTXOSet(), UTXOSet([_utxo(1)]), max_bytes=1)
+    with pytest.raises(ValueError, match="uint16"):
+        build_utxo_diff(
+            UTXOSet(),
+            UTXOSet(),
+            max_entries=sync.MAX_UTXO_DIFF_IBLT_ENTRIES + 1,
+        )
+    with pytest.raises(UTXOReconciliationError, match="uint16"):
+        sync._canonical_iblt_cell_count(sync.MAX_UTXO_DIFF_IBLT_ENTRIES + 1)
 
 
 @pytest.mark.parametrize(
@@ -341,6 +357,15 @@ def test_iblt_peel_rejects_non_self_clearing_pure_cell() -> None:
 
     with _deadline():
         assert sync._peel_iblt(tuple(cells)) is None
+
+
+def test_iblt_position_exhaustion_raises_reconciliation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sync, "hash_bytes", lambda _payload: bytes(HASH_LEN_BYTES))
+
+    with pytest.raises(UTXOReconciliationError, match="unique UTXO IBLT positions"):
+        sync._iblt_positions(bytes(sync.UTXO_IBLT_KEY_BYTES), sync.UTXO_IBLT_MIN_CELLS)
 
 
 def _iblt_size(change_count: int) -> int:

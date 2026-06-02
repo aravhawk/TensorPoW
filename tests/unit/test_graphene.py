@@ -14,7 +14,7 @@ from tensorpow.chain.blocks import (
     tx_merkle_root,
 )
 from tensorpow.chain.headers import FruitHeader
-from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
+from tensorpow.crypto.signatures import SIG_TYPE_ED25519, SIG_TYPE_ED25519_BIT, sign
 from tensorpow.mempool import Mempool
 from tensorpow.net import (
     CODEC_GRAPHENE,
@@ -24,12 +24,17 @@ from tensorpow.net import (
     reconstruct_fruit,
 )
 from tensorpow.pow.challenge import FORMAT_EPOCH
-from tensorpow.state.utxo import TEMPLATE_PKH
-from tensorpow.tx.transaction import Output, Transaction
+from tensorpow.state.utxo import TEMPLATE_PKH, UTXO, Outpoint, UTXOSet
+from tensorpow.tx.script import pubkey_hash
+from tensorpow.tx.transaction import Input, Output, Transaction
+
+PUB1 = bytes.fromhex("343010a1aba8774dd1e6f4f0c3349bae6824908a1e64cd638dc2ed1bc625af1d")
+PRIV1 = bytes.fromhex("cd4f7f79a2b8168f5cbeccb55d415492fd3504e52ed4fe7b02ea404fede9a40b")
+PKH1 = pubkey_hash(PUB1)
 
 
 def test_reconstructs_fruit_when_receiver_has_all_transactions() -> None:
-    txs = tuple(_coinbase_tx(seed) for seed in range(8))
+    txs = tuple(_relay_tx(seed) for seed in range(8))
     fruit = _fruit(tuple(tx.to_bytes() for tx in txs))
     mempool = _mempool(txs)
 
@@ -40,7 +45,7 @@ def test_reconstructs_fruit_when_receiver_has_all_transactions() -> None:
 
 
 def test_reconstruction_falls_back_when_missing_tx_is_unavailable() -> None:
-    txs = tuple(_coinbase_tx(seed) for seed in range(8))
+    txs = tuple(_relay_tx(seed) for seed in range(8))
     fruit = _fruit(tuple(tx.to_bytes() for tx in txs))
     mempool = _mempool(txs[:-1])
 
@@ -48,7 +53,7 @@ def test_reconstruction_falls_back_when_missing_tx_is_unavailable() -> None:
 
 
 def test_rejects_malformed_truncated_and_noncanonical_sketches() -> None:
-    txs = tuple(_coinbase_tx(seed) for seed in range(5))
+    txs = tuple(_relay_tx(seed) for seed in range(5))
     fruit = _fruit(tuple(tx.to_bytes() for tx in txs))
     mempool = _mempool(txs)
     sketch = announce_fruit(fruit)
@@ -65,15 +70,15 @@ def test_rejects_malformed_truncated_and_noncanonical_sketches() -> None:
 
 
 def test_rejects_overbroad_bloom_before_mempool_reconstruction() -> None:
-    tx = _coinbase_tx(1)
+    tx = _relay_tx(1)
     fruit = _fruit((tx.to_bytes(),))
-    mempool = _mempool(tuple(_coinbase_tx(seed) for seed in range(1, 64)))
+    mempool = _mempool(tuple(_relay_tx(seed) for seed in range(1, 64)))
 
     assert reconstruct_fruit(_with_full_bloom(announce_fruit(fruit)), mempool) is None
 
 
 def test_reconstruction_preserves_canonical_fruit_order() -> None:
-    txs = tuple(_coinbase_tx(seed) for seed in (6, 1, 4, 2, 5, 3))
+    txs = tuple(_relay_tx(seed) for seed in (6, 1, 4, 2, 5, 3))
     fruit = _fruit(tuple(tx.to_bytes() for tx in txs))
     reversed_mempool = _mempool(tuple(reversed(txs)))
 
@@ -98,7 +103,7 @@ def test_sketch_meets_95_percent_compression_for_99_percent_overlap_fixture() ->
 
 
 def test_repeated_announcements_are_deterministic() -> None:
-    txs = tuple(_coinbase_tx(seed) for seed in range(10))
+    txs = tuple(_relay_tx(seed) for seed in range(10))
     fruit = _fruit(tuple(tx.to_bytes() for tx in txs))
 
     first = announce_fruit(fruit)
@@ -140,17 +145,48 @@ def _fruit(transactions: tuple[bytes, ...]) -> Fruit:
     return Fruit(header=header, transactions=transactions)
 
 
-def _coinbase_tx(seed: int) -> Transaction:
-    payload = bytes([seed]) * 32
-    return Transaction.coinbase((Output(seed + 1, TEMPLATE_PKH, payload=payload),))
+def _relay_tx(seed: int) -> Transaction:
+    utxo = _utxo(seed, amount=1_000)
+    output = Output(999, TEMPLATE_PKH, payload=PKH1)
+    unsigned = Transaction(
+        version=FORMAT_EPOCH,
+        sig_type=SIG_TYPE_ED25519,
+        locktime_ms=0,
+        lockheight=0,
+        inputs=(Input(utxo.outpoint),),
+        outputs=(output,),
+    )
+    signature = sign(unsigned.sighash(0), PRIV1)
+    return Transaction(
+        version=unsigned.version,
+        sig_type=unsigned.sig_type,
+        locktime_ms=unsigned.locktime_ms,
+        lockheight=unsigned.lockheight,
+        inputs=(Input(utxo.outpoint, witness=signature + PUB1),),
+        outputs=unsigned.outputs,
+    )
 
 
 def _mempool(txs: tuple[Transaction, ...]) -> Mempool:
-    mempool = Mempool()
+    mempool = Mempool(
+        utxo_view=UTXOSet(
+            _utxo(input_.previous_outpoint.output_index) for tx in txs for input_ in tx.inputs
+        )
+    )
     for tx in txs:
         result = mempool.add_tx(tx)
         assert result.accepted
     return mempool
+
+
+def _utxo(seed: int, *, amount: int = 1_000) -> UTXO:
+    return UTXO(
+        outpoint=Outpoint(bytes([seed]) * 32, seed),
+        amount_matoms=amount,
+        template_id=TEMPLATE_PKH,
+        owner_pubkey_hash=PKH1,
+        payload=PKH1,
+    )
 
 
 def _raw_fixture_tx(seed: int) -> bytes:

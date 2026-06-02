@@ -558,7 +558,7 @@ def _range_for_prefix(key_ints: tuple[int, ...], depth: int, prefix: int) -> tup
 
     shift = KEY_SPACE_BITS - depth
     lower = prefix << shift
-    upper = KEY_SPACE_SIZE if depth == 0 else (prefix + 1) << shift
+    upper = (prefix + 1) << shift
     start = bisect_left(key_ints, lower)
     end = bisect_left(key_ints, upper, start)
     return start, end

@@ -78,6 +78,9 @@ def test_http_json_rpc_covers_all_methods_and_malformed_requests() -> None:
         nonminimal_opcode, nonminimal_payload = _websocket_nonminimal_length_error(port)
         assert nonminimal_opcode == 0x8
         assert int.from_bytes(nonminimal_payload[:2], "big") == 1002
+
+        status = _websocket_bad_key(port)
+        assert status == 400
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -245,6 +248,23 @@ def _websocket_nonminimal_length_error(port: int) -> tuple[int, bytes]:
         masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
         sock.sendall(bytes((0x81, 0x80 | 126)) + len(payload).to_bytes(2, "big") + mask + masked)
         return _read_ws_frame(sock)
+
+
+def _websocket_bad_key(port: int) -> int:
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.settimeout(5)
+        request = (
+            "GET /ws HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Key: bad-key\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        )
+        sock.sendall(request.encode("ascii"))
+        response = _recv_until(sock, b"\r\n\r\n")
+    return int(response.split(maxsplit=2)[1])
 
 
 def _websocket_handshake(sock: socket.socket, port: int) -> None:

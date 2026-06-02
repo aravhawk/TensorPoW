@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import socket
-from base64 import b64encode
+from base64 import b64decode, b64encode
+from binascii import Error as BinasciiError
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ from tensorpow.crypto.address import AddressDecodeError, address_to_pubkey_hash
 from tensorpow.crypto.hash import HASH_LEN_BYTES
 from tensorpow.mempool import Mempool, MempoolEntry, ShardTree, require_shard_id
 from tensorpow.state import UTXO, UTXOSet
-from tensorpow.tx import Transaction, TxDecodeError
+from tensorpow.tx import MAX_TX_BYTES, Transaction, TxDecodeError
 
 type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
@@ -59,6 +60,7 @@ MAX_SUBSCRIPTIONS: Final[int] = 1_024
 MAX_EVENTS_PER_SUBSCRIPTION: Final[int] = 1_024
 SUBSCRIPTION_TTL_SECONDS: Final[float] = 300.0
 WEBSOCKET_GUID: Final[str] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+WEBSOCKET_KEY_BYTES: Final[int] = 16
 
 WS_OPCODE_CONTINUATION: Final[int] = 0x0
 WS_OPCODE_TEXT: Final[int] = 0x1
@@ -607,7 +609,7 @@ class JsonRpcServer:
             return self.backend.gettx(_parse_hash_param(params, "txid"))
         if method == "sendrawtx":
             params = _params(raw_params, required=("rawtx",))
-            return self.backend.sendrawtx(_parse_hex_param(params, "rawtx"))
+            return self.backend.sendrawtx(_parse_hex_param(params, "rawtx", max_bytes=MAX_TX_BYTES))
         if method == "getbalance":
             address, owner_pubkey_hash = _address_param(raw_params)
             return self.backend.getbalance(owner_pubkey_hash, address)
@@ -792,10 +794,16 @@ class _RpcHttpHandler(BaseHTTPRequestHandler):
         version = self.headers.get("Sec-WebSocket-Version")
         upgrade = self.headers.get("Upgrade", "").lower()
         connection = self.headers.get("Connection", "").lower()
-        if not key or version != "13" or upgrade != "websocket" or "upgrade" not in connection:
+        if (
+            not _is_valid_websocket_key(key)
+            or version != "13"
+            or upgrade != "websocket"
+            or "upgrade" not in connection
+        ):
             self._send_json({"error": "invalid websocket upgrade"}, status=HTTPStatus.BAD_REQUEST)
             return
 
+        assert isinstance(key, str)
         self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")
@@ -1087,15 +1095,21 @@ def _parse_hash_param(params: JsonParams, name: str) -> bytes:
     return decoded
 
 
-def _parse_hex_param(params: JsonParams, name: str) -> bytes:
-    return _parse_hex(_string_param(params, name), name)
+def _parse_hex_param(params: JsonParams, name: str, *, max_bytes: int | None = None) -> bytes:
+    return _parse_hex(_string_param(params, name), name, max_bytes=max_bytes)
 
 
-def _parse_hex(value: str, name: str) -> bytes:
+def _parse_hex(value: str, name: str, *, max_bytes: int | None = None) -> bytes:
     if value.strip() != value or value.lower() != value:
         raise JsonRpcError(INVALID_PARAMS, "Invalid params", f"{name} must be canonical hex")
     if len(value) % 2 != 0:
         raise JsonRpcError(INVALID_PARAMS, "Invalid params", f"{name} must be even-length hex")
+    if max_bytes is not None and len(value) > max_bytes * 2:
+        raise JsonRpcError(
+            INVALID_PARAMS,
+            "Invalid params",
+            {"field": name, "maximum_bytes": max_bytes},
+        )
     try:
         decoded = bytes.fromhex(value)
     except ValueError as error:
@@ -1257,8 +1271,32 @@ def _node_sendrawtx_response(processed: object) -> JsonObject:
 def _coerce_sendrawtx_object(value: object) -> JsonObject:
     if isinstance(value, dict):
         normalized = _json_object(value)
-        if "accepted" in normalized:
-            return normalized
+        accepted = normalized.get("accepted")
+        if not isinstance(accepted, bool):
+            raise JsonRpcError(
+                INTERNAL_ERROR,
+                "Internal error",
+                "sendrawtx backend returned invalid accepted flag",
+            )
+        tx_id = _hex_hash_field(normalized.get("txid"))
+        reason = normalized.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            raise JsonRpcError(
+                INTERNAL_ERROR,
+                "Internal error",
+                "sendrawtx backend returned invalid reason",
+            )
+        shard_id = _optional_nonnegative_int_field(normalized, "shard_id")
+        fee_matoms = _optional_nonnegative_int_field(normalized, "fee_matoms")
+        fee_rate = _optional_nonnegative_int_field(normalized, "fee_rate_matoms_per_kb")
+        return _sendrawtx_response(
+            accepted,
+            reason=reason,
+            tx_id=tx_id,
+            shard_id=shard_id,
+            fee_matoms=fee_matoms,
+            fee_rate_matoms_per_kb=fee_rate,
+        )
     raise JsonRpcError(INTERNAL_ERROR, "Internal error", "sendrawtx backend returned invalid data")
 
 
@@ -1577,6 +1615,16 @@ def _websocket_accept(key: str) -> str:
     return b64encode(digest).decode("ascii")
 
 
+def _is_valid_websocket_key(key: object) -> bool:
+    if not isinstance(key, str):
+        return False
+    try:
+        decoded = b64decode(key.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, BinasciiError):
+        return False
+    return len(decoded) == WEBSOCKET_KEY_BYTES and b64encode(decoded).decode("ascii") == key
+
+
 def _read_websocket_frame(sock: socket.socket, *, max_payload_bytes: int) -> _WebSocketFrame | None:
     header = _read_exact(sock, 2)
     if header is None:
@@ -1726,6 +1774,45 @@ def _optional_nonnegative_int(value: object) -> int | None:
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _hex_hash_field(value: object) -> bytes | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise JsonRpcError(
+            INTERNAL_ERROR,
+            "Internal error",
+            "sendrawtx backend returned invalid txid",
+        )
+    try:
+        decoded = _parse_hex(value, "txid")
+    except JsonRpcError as exc:
+        raise JsonRpcError(
+            INTERNAL_ERROR,
+            "Internal error",
+            "sendrawtx backend returned invalid txid",
+        ) from exc
+    if len(decoded) != HASH_LEN_BYTES:
+        raise JsonRpcError(
+            INTERNAL_ERROR,
+            "Internal error",
+            "sendrawtx backend returned invalid txid",
+        )
+    return decoded
+
+
+def _optional_nonnegative_int_field(value: JsonObject, name: str) -> int | None:
+    if name not in value:
+        return None
+    parsed = _optional_nonnegative_int(value[name])
+    if parsed is None:
+        raise JsonRpcError(
+            INTERNAL_ERROR,
+            "Internal error",
+            f"sendrawtx backend returned invalid {name}",
+        )
+    return parsed
 
 
 __all__ = [

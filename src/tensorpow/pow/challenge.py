@@ -160,7 +160,7 @@ def build_challenge(
     *,
     matrix_dim: int = POW_MATRIX_DIM,
 ) -> torch.Tensor:
-    """Compatibility helper for the milestone API; returns matrix A."""
+    """Compatibility helper for the milestone API; not for consensus validation."""
 
     if domain == DOMAIN_POW_CHALLENGE_FRUIT:
         header: PowHeader = FruitPowHeader(

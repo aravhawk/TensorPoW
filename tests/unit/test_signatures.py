@@ -188,6 +188,8 @@ def test_verify_by_sig_type_dispatches_ed25519_and_rejects_unknown_types() -> No
     )
     with pytest.raises(TypeError):
         verify_by_sig_type("0", b"", RFC8032_TEST1_SIGNATURE, RFC8032_TEST1_PUBLIC_KEY)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="bool"):
+        verify_by_sig_type(False, b"", RFC8032_TEST1_SIGNATURE, RFC8032_TEST1_PUBLIC_KEY)
 
 
 def test_verify_by_sig_type_uses_dispatch_table(monkeypatch: pytest.MonkeyPatch) -> None:
