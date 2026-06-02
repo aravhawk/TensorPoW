@@ -420,11 +420,20 @@ of the receiving node's adjusted network time.
 Anchor WTEMA:
 
 1. Use at most `WTEMA_WINDOW_ANCHORS` most recent parent-chain anchor intervals.
+   If fewer intervals exist, use all available intervals. The window is
+   recomputed from the supplied parent-chain history for each target calculation;
+   implementations MUST NOT carry WTEMA accumulator state forward outside this
+   window.
 2. Clamp each observed interval to
    `[ANCHOR_INTERVAL_MS / WTEMA_MAX_ADJUSTMENT_FACTOR,
    ANCHOR_INTERVAL_MS * WTEMA_MAX_ADJUSTMENT_FACTOR]`.
 3. Compute the exponentially weighted interval ratio in fixed-point integer
-   arithmetic with `WTEMA_ALPHA_NUM / WTEMA_ALPHA_DEN`.
+   arithmetic with `WTEMA_ALPHA_NUM / WTEMA_ALPHA_DEN`: initialize
+   `ratio_fp = 2^64`, then fold the clamped intervals in chronological order as
+   `sample_fp = interval_ms * 2^64 / ANCHOR_INTERVAL_MS` and
+   `ratio_fp = ((WTEMA_ALPHA_DEN - WTEMA_ALPHA_NUM) * ratio_fp
+   + WTEMA_ALPHA_NUM * sample_fp) / WTEMA_ALPHA_DEN`, using integer floor
+   division at each `/`.
 4. Multiply previous target by that ratio.
 5. Clamp per-anchor target movement to the same max-adjustment factor.
 6. Clamp final target to `[ANCHOR_MIN_TARGET_LE, ANCHOR_MAX_TARGET_LE]`.
