@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+import pytest
+
 from tensorpow.crypto.address import pubkey_to_address
 from tensorpow.crypto.signatures import sign
-from tensorpow.mempool import ROOT_SHARD_ID
 from tensorpow.rpc.server import (
     INVALID_PARAMS,
     INVALID_REQUEST,
+    MAX_GETUTXOS_LIMIT,
+    MAX_JSON_RPC_BATCH_SIZE,
     METHOD_NOT_FOUND,
     PARSE_ERROR,
     InMemoryRpcBackend,
@@ -24,6 +27,7 @@ PUB1 = bytes.fromhex("343010a1aba8774dd1e6f4f0c3349bae6824908a1e64cd638dc2ed1bc6
 PRIV1 = bytes.fromhex("cd4f7f79a2b8168f5cbeccb55d415492fd3504e52ed4fe7b02ea404fede9a40b")
 ADDRESS1 = pubkey_to_address(PUB1)
 PKH1 = pubkey_hash(PUB1)
+ROOT_SHARD_ID = 0
 
 
 def test_all_rpc_methods_return_project_shaped_results() -> None:
@@ -155,6 +159,59 @@ def test_batches_omit_notifications_and_preserve_errors() -> None:
     assert response[1]["error"]["code"] == INVALID_REQUEST
 
 
+def test_batch_size_is_bounded() -> None:
+    server = JsonRpcServer(InMemoryRpcBackend())
+    payload: list[dict[str, object]] = [
+        {"jsonrpc": "2.0", "method": "getshardtree", "id": index}
+        for index in range(MAX_JSON_RPC_BATCH_SIZE + 1)
+    ]
+
+    assert _error_code(_handle(server, payload)) == INVALID_REQUEST
+
+
+def test_getutxos_uses_owner_index_and_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
+    first = _utxo(1, amount=100)
+    second = _utxo(3, amount=300)
+    other = _utxo(2, amount=200, owner=bytes([4]) * 32)
+    utxo_set = UTXOSet((second, other, first))
+    backend = InMemoryRpcBackend(utxo_set=utxo_set)
+    server = JsonRpcServer(backend)
+
+    def fail_global_scan() -> tuple[UTXO, ...]:
+        raise AssertionError("getbalance/getutxos must not scan all UTXOs")
+
+    monkeypatch.setattr(utxo_set, "utxos", fail_global_scan)
+
+    balance = _rpc(server, "getbalance", {"address": ADDRESS1})
+    page = _rpc(server, "getutxos", {"address": ADDRESS1, "offset": 1, "limit": 1})
+
+    assert balance == {"address": ADDRESS1, "balance_matoms": 400, "utxo_count": 2}
+    assert page["address"] == ADDRESS1
+    assert page["offset"] == 1
+    assert page["limit"] == 1
+    assert page["total"] == 2
+    assert page["utxos"] == [_utxo_json(second)]
+
+
+def test_getutxos_rejects_unbounded_limits() -> None:
+    server = JsonRpcServer(InMemoryRpcBackend())
+
+    assert (
+        _error_code(
+            _handle(
+                server,
+                {
+                    "jsonrpc": "2.0",
+                    "method": "getutxos",
+                    "params": {"address": ADDRESS1, "limit": MAX_GETUTXOS_LIMIT + 1},
+                    "id": 1,
+                },
+            )
+        )
+        == INVALID_PARAMS
+    )
+
+
 def test_structural_node_adapter_uses_node_methods() -> None:
     tx = Transaction.coinbase((Output(100, TEMPLATE_PKH, payload=PKH1),))
     node = _FakeNode(tx)
@@ -232,12 +289,12 @@ def _outpoint(seed: int) -> Outpoint:
     return Outpoint(bytes([seed]) * 32, 0)
 
 
-def _utxo(seed: int, *, amount: int) -> UTXO:
+def _utxo(seed: int, *, amount: int, owner: bytes = PKH1) -> UTXO:
     return UTXO(
         outpoint=_outpoint(seed),
         amount_matoms=amount,
         template_id=TEMPLATE_PKH,
-        owner_pubkey_hash=PKH1,
+        owner_pubkey_hash=owner,
     )
 
 

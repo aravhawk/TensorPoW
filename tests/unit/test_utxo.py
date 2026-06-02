@@ -81,6 +81,37 @@ def test_utxo_set_add_remove_roots_and_order_independence() -> None:
     assert not utxo_set.contains(utxo.outpoint)
 
 
+def test_utxo_set_by_owner_tracks_add_remove_in_canonical_order() -> None:
+    owner = bytes([9]) * 32
+    other_owner = bytes([8]) * 32
+    later = UTXO(
+        outpoint=Outpoint(bytes([2]) * 32, 0),
+        amount_matoms=2,
+        template_id=TEMPLATE_PKH,
+        owner_pubkey_hash=owner,
+    )
+    earlier = UTXO(
+        outpoint=Outpoint(bytes([1]) * 32, 0),
+        amount_matoms=1,
+        template_id=TEMPLATE_PKH,
+        owner_pubkey_hash=owner,
+    )
+    other = UTXO(
+        outpoint=Outpoint(bytes([3]) * 32, 0),
+        amount_matoms=3,
+        template_id=TEMPLATE_PKH,
+        owner_pubkey_hash=other_owner,
+    )
+    utxo_set = UTXOSet((later, other, earlier))
+
+    assert utxo_set.by_owner(owner) == (earlier, later)
+    assert utxo_set.by_owner(other_owner) == (other,)
+    assert utxo_set.remove(earlier.outpoint) == earlier
+    assert utxo_set.by_owner(owner) == (later,)
+    assert utxo_set.remove(later.outpoint) == later
+    assert utxo_set.by_owner(owner) == ()
+
+
 def test_utxo_inclusion_and_non_inclusion_proofs_verify_and_tampering_fails() -> None:
     utxo = _utxo()
     utxo_set = UTXOSet([utxo, _other_utxo()])

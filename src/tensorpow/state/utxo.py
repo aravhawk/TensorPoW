@@ -223,6 +223,7 @@ class UTXOSet:
     def __init__(self, utxos: Iterable[UTXO] | None = None) -> None:
         self._utxos: dict[Outpoint, UTXO] = {}
         self._outpoint_by_key: dict[bytes, Outpoint] = {}
+        self._outpoints_by_owner: dict[bytes, set[Outpoint]] = {}
         self._items_cache: tuple[_MerkleItem, ...] | None = None
         self._key_ints_cache: tuple[int, ...] | None = None
         self._subtree_cache: dict[tuple[int, int], bytes] = {}
@@ -247,6 +248,7 @@ class UTXOSet:
             raise ValueError("duplicate UTXO Merkle key")
         self._utxos[utxo.outpoint] = utxo
         self._outpoint_by_key[outpoint_key] = utxo.outpoint
+        self._outpoints_by_owner.setdefault(utxo.owner_pubkey_hash, set()).add(utxo.outpoint)
         self._invalidate_merkle_cache()
 
     def remove(self, outpoint: Outpoint) -> UTXO:
@@ -258,6 +260,10 @@ class UTXOSet:
         except KeyError as exc:
             raise KeyError("outpoint is not present in UTXO set") from exc
         del self._outpoint_by_key[utxo.outpoint_key()]
+        owner_outpoints = self._outpoints_by_owner[utxo.owner_pubkey_hash]
+        owner_outpoints.remove(outpoint)
+        if not owner_outpoints:
+            del self._outpoints_by_owner[utxo.owner_pubkey_hash]
         self._invalidate_merkle_cache()
         return utxo
 
@@ -277,6 +283,20 @@ class UTXOSet:
         """Return all UTXOs in canonical outpoint order."""
 
         return tuple(sorted(self._utxos.values(), key=lambda utxo: utxo.outpoint.to_bytes()))
+
+    def by_owner(self, owner_pubkey_hash: bytes) -> tuple[UTXO, ...]:
+        """Return one owner's UTXOs in canonical outpoint order."""
+
+        _require_hash("owner_pubkey_hash", owner_pubkey_hash)
+        outpoints = self._outpoints_by_owner.get(owner_pubkey_hash)
+        if not outpoints:
+            return ()
+        return tuple(
+            sorted(
+                (self._utxos[outpoint] for outpoint in outpoints),
+                key=lambda utxo: utxo.outpoint.to_bytes(),
+            )
+        )
 
     def merkle_root(self) -> bytes:
         """Return the compact sparse Merkle root of the current UTXO set."""

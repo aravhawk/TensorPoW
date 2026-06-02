@@ -9,7 +9,13 @@ import socket
 from threading import Thread
 
 from tensorpow.crypto.address import pubkey_to_address
-from tensorpow.rpc.server import PARSE_ERROR, InMemoryRpcBackend, JsonRpcServer, create_http_server
+from tensorpow.rpc.server import (
+    PARSE_ERROR,
+    InMemoryRpcBackend,
+    JsonRpcServer,
+    RpcHttpServer,
+    create_http_server,
+)
 
 
 def test_http_json_rpc_covers_all_methods_and_malformed_requests() -> None:
@@ -76,6 +82,70 @@ def test_http_json_rpc_covers_all_methods_and_malformed_requests() -> None:
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=5)
+
+
+def test_http_request_body_read_times_out() -> None:
+    httpd, thread, port = _start_server(request_timeout_seconds=0.1)
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            sock.settimeout(5)
+            sock.sendall(
+                b"POST /rpc HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 20\r\n"
+                b"\r\n"
+                b"{"
+            )
+            response = _recv_until(sock, b"\r\n\r\n")
+
+        assert response.startswith(b"HTTP/1.1 408")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+def test_websocket_idle_read_deadline_closes_connection() -> None:
+    httpd, thread, port = _start_server(request_timeout_seconds=0.1)
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            sock.settimeout(5)
+            _websocket_handshake(sock, port)
+            assert sock.recv(1) == b""
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+def test_http_server_enforces_connection_cap() -> None:
+    httpd = create_http_server(
+        rpc_server=JsonRpcServer(InMemoryRpcBackend()),
+        port=0,
+        max_connections=1,
+    )
+    left, right = socket.socketpair()
+    try:
+        assert httpd._connection_slots.acquire(blocking=False)
+        httpd.process_request(left, ("local", 0))
+        assert left.fileno() == -1
+    finally:
+        httpd._connection_slots.release()
+        right.close()
+        httpd.server_close()
+
+
+def _start_server(*, request_timeout_seconds: float) -> tuple[RpcHttpServer, Thread, int]:
+    rpc_server = JsonRpcServer(InMemoryRpcBackend())
+    httpd = create_http_server(
+        rpc_server=rpc_server,
+        port=0,
+        request_timeout_seconds=request_timeout_seconds,
+    )
+    thread = Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    return httpd, thread, int(httpd.server_address[1])
 
 
 def _rpc(

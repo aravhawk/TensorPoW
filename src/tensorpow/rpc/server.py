@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from json import JSONDecodeError
 from math import isfinite
 from secrets import token_hex
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 from typing import Final, Protocol, cast, runtime_checkable
 from urllib.parse import parse_qs, urlparse
 
@@ -34,6 +34,7 @@ type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 type JsonObject = dict[str, JsonValue]
 type JsonParams = dict[str, object]
+type _SocketServerRequest = socket.socket | tuple[bytes, socket.socket]
 
 JSONRPC_VERSION: Final[str] = "2.0"
 
@@ -44,6 +45,11 @@ INVALID_PARAMS: Final[int] = -32602
 INTERNAL_ERROR: Final[int] = -32603
 
 MAX_HTTP_BODY_BYTES: Final[int] = 1_048_576
+MAX_JSON_RPC_BATCH_SIZE: Final[int] = 100
+DEFAULT_GETUTXOS_LIMIT: Final[int] = 100
+MAX_GETUTXOS_LIMIT: Final[int] = 1_000
+RPC_REQUEST_TIMEOUT_SECONDS: Final[float] = 5.0
+MAX_RPC_CONNECTIONS: Final[int] = 64
 DEFAULT_EVENT_DRAIN_LIMIT: Final[int] = 100
 MAX_EVENT_DRAIN_LIMIT: Final[int] = 1_000
 WEBSOCKET_GUID: Final[str] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -151,7 +157,14 @@ class RpcBackend(Protocol):
     def getbalance(self, owner_pubkey_hash: bytes, address: str) -> JsonObject:
         """Return the spendable balance for ``address``."""
 
-    def getutxos(self, owner_pubkey_hash: bytes, address: str) -> JsonObject:
+    def getutxos(
+        self,
+        owner_pubkey_hash: bytes,
+        address: str,
+        *,
+        offset: int = 0,
+        limit: int = DEFAULT_GETUTXOS_LIMIT,
+    ) -> JsonObject:
         """Return UTXOs for ``address``."""
 
     def getmempool(self, shard_id: int | None) -> JsonObject:
@@ -242,11 +255,22 @@ class InMemoryRpcBackend:
             "utxo_count": len(utxos),
         }
 
-    def getutxos(self, owner_pubkey_hash: bytes, address: str) -> JsonObject:
+    def getutxos(
+        self,
+        owner_pubkey_hash: bytes,
+        address: str,
+        *,
+        offset: int = 0,
+        limit: int = DEFAULT_GETUTXOS_LIMIT,
+    ) -> JsonObject:
         utxos = _utxos_for_owner(self.utxo_set, owner_pubkey_hash)
+        page = utxos[offset : offset + limit]
         return {
             "address": address,
-            "utxos": [_utxo_json(utxo) for utxo in utxos],
+            "offset": offset,
+            "limit": limit,
+            "total": len(utxos),
+            "utxos": [_utxo_json(utxo) for utxo in page],
         }
 
     def getmempool(self, shard_id: int | None) -> JsonObject:
@@ -318,11 +342,22 @@ class NodeRpcAdapter:
             "utxo_count": len(utxos),
         }
 
-    def getutxos(self, owner_pubkey_hash: bytes, address: str) -> JsonObject:
+    def getutxos(
+        self,
+        owner_pubkey_hash: bytes,
+        address: str,
+        *,
+        offset: int = 0,
+        limit: int = DEFAULT_GETUTXOS_LIMIT,
+    ) -> JsonObject:
         utxos = _utxos_for_owner(_node_utxo_set(self._node), owner_pubkey_hash)
+        page = utxos[offset : offset + limit]
         return {
             "address": address,
-            "utxos": [_utxo_json(utxo) for utxo in utxos],
+            "offset": offset,
+            "limit": limit,
+            "total": len(utxos),
+            "utxos": [_utxo_json(utxo) for utxo in page],
         }
 
     def getmempool(self, shard_id: int | None) -> JsonObject:
@@ -396,6 +431,13 @@ class JsonRpcServer:
         if isinstance(message, list):
             if not message:
                 return _error_response(None, INVALID_REQUEST, "Invalid Request")
+            if len(message) > MAX_JSON_RPC_BATCH_SIZE:
+                return _error_response(
+                    None,
+                    INVALID_REQUEST,
+                    "Invalid Request",
+                    {"max_batch_size": MAX_JSON_RPC_BATCH_SIZE},
+                )
             responses: list[JsonValue] = []
             for item in message:
                 response = self._handle_request(item)
@@ -470,8 +512,13 @@ class JsonRpcServer:
             address, owner_pubkey_hash = _address_param(raw_params)
             return self.backend.getbalance(owner_pubkey_hash, address)
         if method == "getutxos":
-            address, owner_pubkey_hash = _address_param(raw_params)
-            return self.backend.getutxos(owner_pubkey_hash, address)
+            address, owner_pubkey_hash, offset, limit = _utxo_query_params(raw_params)
+            return self.backend.getutxos(
+                owner_pubkey_hash,
+                address,
+                offset=offset,
+                limit=limit,
+            )
         if method == "getmempool":
             params = _params(raw_params, optional=("shard_id",))
             shard_id = _optional_shard_id(params.get("shard_id"))
@@ -504,15 +551,55 @@ class RpcHttpServer(ThreadingHTTPServer):
         rpc_server: JsonRpcServer,
         *,
         max_body_bytes: int = MAX_HTTP_BODY_BYTES,
+        request_timeout_seconds: float = RPC_REQUEST_TIMEOUT_SECONDS,
+        max_connections: int = MAX_RPC_CONNECTIONS,
     ) -> None:
         super().__init__(server_address, _RpcHttpHandler)
         self.rpc_server = rpc_server
         self.max_body_bytes = _require_positive_int("max_body_bytes", max_body_bytes)
+        self.request_timeout_seconds = _require_positive_float(
+            "request_timeout_seconds",
+            request_timeout_seconds,
+        )
+        self._connection_slots = BoundedSemaphore(
+            _require_positive_int("max_connections", max_connections)
+        )
+
+    def process_request(self, request: _SocketServerRequest, client_address: object) -> None:
+        """Start one request thread when a connection slot is available."""
+
+        if not self._connection_slots.acquire(blocking=False):
+            _close_server_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(
+        self,
+        request: _SocketServerRequest,
+        client_address: object,
+    ) -> None:
+        """Release the connection slot after the request thread exits."""
+
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
 
 
 class _RpcHttpHandler(BaseHTTPRequestHandler):
     server_version = "TensorPoWRPC"
     protocol_version = "HTTP/1.1"
+
+    def setup(self) -> None:
+        """Install the server read deadline on accepted HTTP/WS sockets."""
+
+        super().setup()
+        rpc_http_server = cast(RpcHttpServer, self.server)
+        self.connection.settimeout(rpc_http_server.request_timeout_seconds)
 
     def do_POST(self) -> None:
         """Serve JSON-RPC requests on ``/`` and ``/rpc``."""
@@ -538,7 +625,22 @@ class _RpcHttpHandler(BaseHTTPRequestHandler):
             )
             return
 
-        response = rpc_http_server.rpc_server.handle_json(self.rfile.read(length))
+        try:
+            body = self.rfile.read(length)
+        except TimeoutError:
+            self.close_connection = True
+            self._send_json({"error": "request timeout"}, status=HTTPStatus.REQUEST_TIMEOUT)
+            return
+        except OSError:
+            self.close_connection = True
+            self._send_json({"error": "request read failed"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if len(body) != length:
+            self.close_connection = True
+            self._send_json({"error": "incomplete request body"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        response = rpc_http_server.rpc_server.handle_json(body)
         if response is None:
             self.send_response(HTTPStatus.NO_CONTENT)
             self.send_header("Content-Length", "0")
@@ -669,12 +771,20 @@ def create_http_server(
     port: int = 28332,
     rpc_server: JsonRpcServer | None = None,
     max_body_bytes: int = MAX_HTTP_BODY_BYTES,
+    request_timeout_seconds: float = RPC_REQUEST_TIMEOUT_SECONDS,
+    max_connections: int = MAX_RPC_CONNECTIONS,
 ) -> RpcHttpServer:
     """Create a stdlib HTTP JSON-RPC server without starting its loop."""
 
     if rpc_server is None:
         rpc_server = JsonRpcServer(backend)
-    return RpcHttpServer((host, port), rpc_server, max_body_bytes=max_body_bytes)
+    return RpcHttpServer(
+        (host, port),
+        rpc_server,
+        max_body_bytes=max_body_bytes,
+        request_timeout_seconds=request_timeout_seconds,
+        max_connections=max_connections,
+    )
 
 
 def openrpc_document() -> JsonObject:
@@ -719,7 +829,15 @@ def openrpc_document() -> JsonObject:
             _openrpc_method(
                 "getutxos",
                 "Return spendable UTXOs for an address.",
-                (("address", {"type": "string"}, True),),
+                (
+                    ("address", {"type": "string"}, True),
+                    ("offset", {"type": "integer", "minimum": 0}, False),
+                    (
+                        "limit",
+                        {"type": "integer", "minimum": 1, "maximum": MAX_GETUTXOS_LIMIT},
+                        False,
+                    ),
+                ),
                 _object_schema(),
             ),
             _openrpc_method(
@@ -789,6 +907,25 @@ def _address_param(raw_params: object) -> tuple[str, bytes]:
         raise JsonRpcError(INVALID_PARAMS, "Invalid params", str(error)) from error
 
 
+def _utxo_query_params(raw_params: object) -> tuple[str, bytes, int, int]:
+    params = _params(raw_params, required=("address",), optional=("offset", "limit"))
+    address = _string_param(params, "address")
+    try:
+        owner_pubkey_hash = address_to_pubkey_hash(address)
+    except (AddressDecodeError, TypeError, ValueError) as error:
+        raise JsonRpcError(INVALID_PARAMS, "Invalid params", str(error)) from error
+    return (
+        address,
+        owner_pubkey_hash,
+        _nonnegative_int_param(params.get("offset", 0), "offset"),
+        _positive_limited_int_param(
+            params.get("limit", DEFAULT_GETUTXOS_LIMIT),
+            "limit",
+            MAX_GETUTXOS_LIMIT,
+        ),
+    )
+
+
 def _parse_hash_param(params: JsonParams, name: str) -> bytes:
     value = _string_param(params, name)
     decoded = _parse_hex(value, name)
@@ -831,6 +968,27 @@ def _optional_shard_id(value: object) -> int | None:
         return require_shard_id(value)
     except (TypeError, ValueError) as error:
         raise JsonRpcError(INVALID_PARAMS, "Invalid params", str(error)) from error
+
+
+def _nonnegative_int_param(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise JsonRpcError(INVALID_PARAMS, "Invalid params", f"{name} must be an integer")
+    if value < 0:
+        raise JsonRpcError(INVALID_PARAMS, "Invalid params", f"{name} must be nonnegative")
+    return value
+
+
+def _positive_limited_int_param(value: object, name: str, maximum: int) -> int:
+    parsed = _nonnegative_int_param(value, name)
+    if parsed == 0:
+        raise JsonRpcError(INVALID_PARAMS, "Invalid params", f"{name} must be positive")
+    if parsed > maximum:
+        raise JsonRpcError(
+            INVALID_PARAMS,
+            "Invalid params",
+            {"field": name, "maximum": maximum},
+        )
+    return parsed
 
 
 def _request_id_or_none(request: object) -> JsonScalar:
@@ -1082,7 +1240,7 @@ def _coerce_finality_result(block_hash: bytes, value: object) -> JsonObject:
 
 def _utxos_for_owner(utxo_set: UTXOSet, owner_pubkey_hash: bytes) -> tuple[UTXO, ...]:
     _require_hash_bytes("owner_pubkey_hash", owner_pubkey_hash)
-    return tuple(utxo for utxo in utxo_set.utxos() if utxo.owner_pubkey_hash == owner_pubkey_hash)
+    return utxo_set.by_owner(owner_pubkey_hash)
 
 
 def _mempool_entries(mempool: Mempool, shard_id: int | None) -> tuple[MempoolEntry, ...]:
@@ -1284,10 +1442,20 @@ def _websocket_close_payload(code: int, reason: str = "") -> bytes:
     return code.to_bytes(2, "big") + reason.encode("utf-8")[:123]
 
 
+def _close_server_request(request: _SocketServerRequest) -> None:
+    if isinstance(request, socket.socket):
+        request.close()
+        return
+    request[1].close()
+
+
 def _read_exact(sock: socket.socket, length: int) -> bytes | None:
     chunks = bytearray()
     while len(chunks) < length:
-        chunk = sock.recv(length - len(chunks))
+        try:
+            chunk = sock.recv(length - len(chunks))
+        except (OSError, TimeoutError):
+            return None
         if not chunk:
             return None
         chunks.extend(chunk)
@@ -1332,6 +1500,15 @@ def _require_positive_int(name: str, value: object) -> int:
     return value
 
 
+def _require_positive_float(name: str, value: object) -> float:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise TypeError(f"{name} must be numeric")
+    parsed = float(value)
+    if not isfinite(parsed) or parsed <= 0.0:
+        raise ValueError(f"{name} must be a positive finite number")
+    return parsed
+
+
 def _require_event_limit(value: int) -> int:
     value = _require_positive_int("limit", value)
     return min(value, MAX_EVENT_DRAIN_LIMIT)
@@ -1355,13 +1532,18 @@ def _optional_str(value: object) -> str | None:
 
 __all__ = [
     "DEFAULT_EVENT_DRAIN_LIMIT",
+    "DEFAULT_GETUTXOS_LIMIT",
     "INTERNAL_ERROR",
     "INVALID_PARAMS",
     "INVALID_REQUEST",
     "JSONRPC_VERSION",
+    "MAX_GETUTXOS_LIMIT",
     "MAX_HTTP_BODY_BYTES",
+    "MAX_JSON_RPC_BATCH_SIZE",
+    "MAX_RPC_CONNECTIONS",
     "METHOD_NOT_FOUND",
     "PARSE_ERROR",
+    "RPC_REQUEST_TIMEOUT_SECONDS",
     "InMemoryRpcBackend",
     "JsonObject",
     "JsonRpcError",
