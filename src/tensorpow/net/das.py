@@ -38,6 +38,10 @@ from tensorpow.crypto.hash import (
 
 DAS_CELL_BYTES: Final[int] = 256
 DAS_RS_EXTENSION_FACTOR: Final[int] = 2
+DAS_RS_PRIMITIVE_POLY: Final[int] = 0x11D
+DAS_RS_GENERATOR: Final[int] = 2
+DAS_RS_FIRST_CONSECUTIVE_ROOT: Final[int] = 0
+DAS_RS_FIELD_EXPONENT: Final[int] = 8
 DAS_SAMPLE_SUCCESS_THRESHOLD_PCT: Final[int] = 75
 DAS_SAMPLES_PER_FRUIT: Final[int] = 10
 DAS_CONFIDENCE_PCT: Final[int] = 99
@@ -809,7 +813,14 @@ def _rs_codec(data_side: int) -> RSCodec:
     _require_positive_u32("data_side", data_side)
     if data_side * DAS_RS_EXTENSION_FACTOR > 255:
         raise ValueError("DAS Reed-Solomon side exceeds GF(2^8) codeword limit")
-    return RSCodec(data_side, nsize=data_side * DAS_RS_EXTENSION_FACTOR)
+    return RSCodec(
+        data_side,
+        nsize=data_side * DAS_RS_EXTENSION_FACTOR,
+        fcr=DAS_RS_FIRST_CONSECUTIVE_ROOT,
+        prim=DAS_RS_PRIMITIVE_POLY,
+        generator=DAS_RS_GENERATOR,
+        c_exp=DAS_RS_FIELD_EXPONENT,
+    )
 
 
 def _grid_has_valid_reed_solomon(cells: Sequence[bytes], data_side: int) -> bool:
@@ -966,6 +977,10 @@ __all__ = [
     "DAS_CELL_BYTES",
     "DAS_CONFIDENCE_PCT",
     "DAS_RS_EXTENSION_FACTOR",
+    "DAS_RS_FIELD_EXPONENT",
+    "DAS_RS_FIRST_CONSECUTIVE_ROOT",
+    "DAS_RS_GENERATOR",
+    "DAS_RS_PRIMITIVE_POLY",
     "DAS_SAMPLES_PER_FRUIT",
     "DAS_SAMPLE_REQUEST_BYTES",
     "DAS_SAMPLE_SUCCESS_THRESHOLD_PCT",

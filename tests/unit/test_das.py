@@ -6,10 +6,15 @@ from dataclasses import replace
 
 import pytest
 
+import tensorpow.net.das as das_module
 from tensorpow.crypto.hash import hash_bytes
 from tensorpow.net.das import (
     DAS_CELL_BYTES,
     DAS_RS_EXTENSION_FACTOR,
+    DAS_RS_FIELD_EXPONENT,
+    DAS_RS_FIRST_CONSECUTIVE_ROOT,
+    DAS_RS_GENERATOR,
+    DAS_RS_PRIMITIVE_POLY,
     DAS_SAMPLE_SUCCESS_THRESHOLD_PCT,
     DAS_SAMPLES_PER_FRUIT,
     DAS_WITHHOLDING_DETECTION_PCT,
@@ -55,6 +60,50 @@ def test_encode_payload_is_bit_exact_and_reed_solomon_extended() -> None:
     assert encoding.cells[2][-16:].hex() == "eaede4e3f6f1f8ffd2d5dcdbcec9c0c7"
     assert encoding.cells[-1][:16].hex() == "d792da52ae269f9263299fb703798a4a"
     assert encoding.cells[-1][-16:].hex() == "5c4874600c182430fce8d4c0acb88490"
+
+
+def test_das_reed_solomon_codec_pins_field_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, int] = {}
+
+    class CapturingRSCodec:
+        def __init__(
+            self,
+            nsym: int,
+            *,
+            nsize: int,
+            fcr: int,
+            prim: int,
+            generator: int,
+            c_exp: int,
+        ) -> None:
+            captured.update(
+                {
+                    "nsym": nsym,
+                    "nsize": nsize,
+                    "fcr": fcr,
+                    "prim": prim,
+                    "generator": generator,
+                    "c_exp": c_exp,
+                }
+            )
+
+    das_module._rs_codec.cache_clear()
+    monkeypatch.setattr(das_module, "RSCodec", CapturingRSCodec)
+    try:
+        das_module._rs_codec(2)
+    finally:
+        das_module._rs_codec.cache_clear()
+
+    assert captured == {
+        "nsym": 2,
+        "nsize": 4,
+        "fcr": DAS_RS_FIRST_CONSECUTIVE_ROOT,
+        "prim": DAS_RS_PRIMITIVE_POLY,
+        "generator": DAS_RS_GENERATOR,
+        "c_exp": DAS_RS_FIELD_EXPONENT,
+    }
 
 
 def test_sample_selection_and_proof_verification_are_deterministic() -> None:

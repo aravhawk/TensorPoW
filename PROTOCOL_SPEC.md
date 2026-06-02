@@ -845,9 +845,12 @@ Rules:
 
 - Cell size is `DAS_CELL_BYTES`.
 - If the data matrix side is `k`, the extended matrix side is
-  `DAS_RS_EXTENSION_FACTOR * k`. The reference codec uses
-  Reed-Solomon over GF(2^8), extends every data row from `k` to `2k`
-  symbols, then extends every resulting column from `k` to `2k` symbols.
+  `DAS_RS_EXTENSION_FACTOR * k`. Reed-Solomon coding is over GF(2^8) with
+  primitive polynomial `DAS_RS_PRIMITIVE_POLY`, generator
+  `DAS_RS_GENERATOR`, first consecutive root
+  `DAS_RS_FIRST_CONSECUTIVE_ROOT`, and field exponent
+  `DAS_RS_FIELD_EXPONENT`. Encoders extend every data row from `k` to `2k`
+  symbols, then extend every resulting column from `k` to `2k` symbols.
 - A light verifier samples `DAS_SAMPLES_PER_FRUIT` uniformly using
   `BLAKE3(DOMAIN_DAS_SAMPLE || fruit_hash || sample_index_le)` as randomness.
 - A fruit is considered available to a light verifier when at least
@@ -1188,6 +1191,10 @@ roots.
 | `DAS_CELL_BYTES` | `256` | DAS matrix cell size. |
 | `DAS_SAMPLE_REQUEST_BYTES` | `44` | Fixed DAS sample request payload size. |
 | `DAS_RS_EXTENSION_FACTOR` | `2` | Reed-Solomon side expansion factor. |
+| `DAS_RS_PRIMITIVE_POLY` | `0x11d` | Reed-Solomon GF(2^8) primitive polynomial. |
+| `DAS_RS_GENERATOR` | `2` | Reed-Solomon GF(2^8) generator. |
+| `DAS_RS_FIRST_CONSECUTIVE_ROOT` | `0` | Reed-Solomon first consecutive root. |
+| `DAS_RS_FIELD_EXPONENT` | `8` | Reed-Solomon GF field exponent. |
 | `DAS_SAMPLE_SUCCESS_THRESHOLD_PCT` | `75` | Availability success threshold. |
 | `DAS_SAMPLES_PER_FRUIT` | `10` | Samples per fruit for light verifier. |
 | `DAS_CONFIDENCE_PCT` | `99` | Claimed light-verifier confidence. |
