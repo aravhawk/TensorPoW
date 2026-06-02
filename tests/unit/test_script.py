@@ -122,6 +122,19 @@ def test_script_vm_executes_core_opcodes_and_lock_checks() -> None:
         check_locks(locktime_ms=0, lockheight=10, current_time_ms=100, current_height=9)
 
 
+def test_script_vm_requires_canonical_boolean_values() -> None:
+    context = ScriptContext(message=MESSAGE)
+
+    assert verify_script(encode_push(b"\x01"), context)
+    assert not verify_script(encode_push(b""), context)
+    assert not verify_script(encode_push(b"\x02"), context)
+
+    with pytest.raises(ScriptError, match="canonical"):
+        execute_script(encode_push(b"\x02") + bytes((OP_VERIFY,)), context)
+    with pytest.raises(ScriptError, match="canonical"):
+        execute_script(encode_push(b"\x00") + bytes((OP_VERIFY,)), context)
+
+
 def test_script_vm_rejects_malformed_programs_and_stack_shapes() -> None:
     context = ScriptContext(message=MESSAGE)
 

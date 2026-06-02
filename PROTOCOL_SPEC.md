@@ -594,6 +594,10 @@ execution MUST be deterministic, bounded by `SCRIPT_MAX_OPS`, and fail on stack
 underflow, invalid opcode, invalid signature type, non-minimal push, or exceeding
 `SCRIPT_MAX_STACK_ITEMS`.
 
+Boolean predicates are canonical. False is encoded as the empty byte string and
+true is encoded as the single byte `0x01`; `OP_VERIFY` and the final script result
+test MUST fail on every other byte string.
+
 Active output templates:
 
 - `TEMPLATE_PKH`: payload is `owner_pubkey_hash`. Witness is

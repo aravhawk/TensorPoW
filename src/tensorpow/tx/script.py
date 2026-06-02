@@ -125,9 +125,9 @@ def verify_script(
 
     try:
         stack = execute_script(script, context, initial_stack=initial_stack)
+        return bool(stack) and _truthy(stack[-1])
     except (ScriptError, TypeError, ValueError):
         return False
-    return bool(stack) and _truthy(stack[-1])
 
 
 def encode_push(item: bytes) -> bytes:
@@ -436,7 +436,11 @@ def _decode_lock(item: bytes, name: str) -> int:
 
 
 def _truthy(item: bytes) -> bool:
-    return any(byte != 0 for byte in item)
+    if item == b"":
+        return False
+    if item == b"\x01":
+        return True
+    raise ScriptError("boolean value must be canonical")
 
 
 def _require_template_id(template_id: int) -> None:
