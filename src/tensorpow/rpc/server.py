@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 from base64 import b64encode
 from collections import deque
@@ -68,6 +69,7 @@ WS_OPCODE_PONG: Final[int] = 0xA
 WS_CLOSE_PROTOCOL_ERROR: Final[int] = 1002
 
 _PARAMS_OMITTED: Final[object] = object()
+_LOGGER = logging.getLogger(__name__)
 
 
 class JsonRpcError(Exception):
@@ -559,10 +561,11 @@ class JsonRpcServer:
             if is_notification:
                 return None
             return _error_response(request_id, error.code, error.message, error.data)
-        except Exception as error:
+        except Exception:
+            _LOGGER.exception("Unhandled JSON-RPC method error")
             if is_notification:
                 return None
-            return _error_response(request_id, INTERNAL_ERROR, "Internal error", str(error))
+            return _error_response(request_id, INTERNAL_ERROR, "Internal error")
 
         if is_notification:
             return None

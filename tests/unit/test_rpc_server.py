@@ -10,6 +10,7 @@ import pytest
 from tensorpow.crypto.address import pubkey_to_address
 from tensorpow.crypto.signatures import sign
 from tensorpow.rpc.server import (
+    INTERNAL_ERROR,
     INVALID_PARAMS,
     INVALID_REQUEST,
     MAX_GETUTXOS_LIMIT,
@@ -213,6 +214,30 @@ def test_malformed_requests_return_clean_json_rpc_errors() -> None:
         == INVALID_REQUEST
     )
     assert _handle(server, {"jsonrpc": "2.0", "method": "getshardtree"}) is None
+
+
+def test_internal_errors_do_not_leak_exception_strings(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    server = JsonRpcServer(InMemoryRpcBackend())
+    caplog.set_level("ERROR")
+
+    def explode() -> dict[str, object]:
+        raise RuntimeError("secret backend path")
+
+    monkeypatch.setattr(server.backend, "getshardtree", explode)
+
+    response = _decode_response(
+        _handle(server, {"jsonrpc": "2.0", "method": "getshardtree", "id": 1})
+    )
+
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error == {"code": INTERNAL_ERROR, "message": "Internal error"}
+    assert "secret backend path" not in json.dumps(response)
+    assert any(record.message == "Unhandled JSON-RPC method error" for record in caplog.records)
 
 
 def test_batches_omit_notifications_and_preserve_errors() -> None:
