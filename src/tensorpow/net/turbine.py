@@ -291,7 +291,7 @@ def select_dropout_peers(
     for peer_id in protected:
         _require_peer_id(peer_id)
     candidate_peers = tuple(peer for peer in peer_tuple if peer.peer_id not in protected)
-    dropout_count = len(peer_tuple) * dropout_pct // 100
+    dropout_count = len(candidate_peers) * dropout_pct // 100
     ranked = sorted(
         candidate_peers,
         key=lambda peer: blake3(anchor_seed + peer.peer_id + b"dropout").digest(),

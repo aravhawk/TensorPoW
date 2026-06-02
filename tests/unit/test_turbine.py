@@ -105,11 +105,27 @@ def test_30_percent_dropout_still_recovers_payload() -> None:
 
     result = simulate_propagation(seed, peers, payload, dropout_peer_ids=dropped)
 
-    assert len(dropped) == TURBINE_SIM_NODE_COUNT * TURBINE_DROPOUT_PCT // 100
+    assert len(dropped) == (TURBINE_SIM_NODE_COUNT - 1) * TURBINE_DROPOUT_PCT // 100
     assert result.reached_peer_count > 0
     assert result.available_chunk_count >= TURBINE_DATA_SHARDS
     assert result.reconstructed_payload == payload
     assert result.latency_ms <= TURBINE_MAX_PROPAGATION_MS
+
+
+def test_dropout_count_uses_unprotected_candidate_pool() -> None:
+    seed = hash_bytes(b"turbine-dropout-protected")
+    peers = _peers(10)
+    protected = tuple(peer.peer_id for peer in peers[:8])
+
+    dropped = select_dropout_peers(
+        seed,
+        peers,
+        dropout_pct=50,
+        protected_peer_ids=protected,
+    )
+
+    assert len(dropped) == 1
+    assert set(dropped).isdisjoint(protected)
 
 
 def _peers(count: int) -> tuple[TurbinePeer, ...]:
