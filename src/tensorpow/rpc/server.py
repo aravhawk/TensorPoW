@@ -15,6 +15,7 @@ from json import JSONDecodeError
 from math import isfinite
 from secrets import token_hex
 from threading import BoundedSemaphore, Lock
+from time import monotonic
 from typing import Final, Protocol, cast, runtime_checkable
 from urllib.parse import parse_qs, urlparse
 
@@ -35,6 +36,7 @@ type JsonValue = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 type JsonObject = dict[str, JsonValue]
 type JsonParams = dict[str, object]
 type _SocketServerRequest = socket.socket | tuple[bytes, socket.socket]
+type _Clock = Callable[[], float]
 
 JSONRPC_VERSION: Final[str] = "2.0"
 
@@ -52,6 +54,9 @@ RPC_REQUEST_TIMEOUT_SECONDS: Final[float] = 5.0
 MAX_RPC_CONNECTIONS: Final[int] = 64
 DEFAULT_EVENT_DRAIN_LIMIT: Final[int] = 100
 MAX_EVENT_DRAIN_LIMIT: Final[int] = 1_000
+MAX_SUBSCRIPTIONS: Final[int] = 1_024
+MAX_EVENTS_PER_SUBSCRIPTION: Final[int] = 1_024
+SUBSCRIPTION_TTL_SECONDS: Final[float] = 300.0
 WEBSOCKET_GUID: Final[str] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 WS_OPCODE_CONTINUATION: Final[int] = 0x0
@@ -92,10 +97,25 @@ class _WebSocketFrame:
 class SubscriptionHub:
     """Small in-process topic hub used by RPC subscribe and HTTP event draining."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        max_subscriptions: int = MAX_SUBSCRIPTIONS,
+        max_events_per_subscription: int = MAX_EVENTS_PER_SUBSCRIPTION,
+        ttl_seconds: float = SUBSCRIPTION_TTL_SECONDS,
+        clock: _Clock = monotonic,
+    ) -> None:
         self._lock = Lock()
+        self.max_subscriptions = _require_positive_int("max_subscriptions", max_subscriptions)
+        self.max_events_per_subscription = _require_positive_int(
+            "max_events_per_subscription",
+            max_events_per_subscription,
+        )
+        self.ttl_seconds = _require_positive_float("ttl_seconds", ttl_seconds)
+        self._clock = clock
         self._subscriptions: dict[str, Subscription] = {}
         self._events: dict[str, deque[JsonObject]] = {}
+        self._expires_at: dict[str, float] = {}
 
     def subscribe(self, topic: str) -> Subscription:
         """Create a subscription for ``topic`` and return its identifier."""
@@ -103,8 +123,19 @@ class SubscriptionHub:
         topic = _require_topic(topic)
         subscription = Subscription(subscription_id=token_hex(16), topic=topic)
         with self._lock:
+            now = self._clock()
+            self._expire_locked(now)
+            if len(self._subscriptions) >= self.max_subscriptions:
+                raise JsonRpcError(
+                    INVALID_PARAMS,
+                    "Subscription limit reached",
+                    {"max_subscriptions": self.max_subscriptions},
+                )
             self._subscriptions[subscription.subscription_id] = subscription
-            self._events[subscription.subscription_id] = deque()
+            self._events[subscription.subscription_id] = deque(
+                maxlen=self.max_events_per_subscription
+            )
+            self._expires_at[subscription.subscription_id] = now + self.ttl_seconds
         return subscription
 
     def publish(self, topic: str, payload: JsonValue) -> int:
@@ -114,6 +145,7 @@ class SubscriptionHub:
         event: JsonObject = {"topic": topic, "payload": payload}
         delivered = 0
         with self._lock:
+            self._expire_locked(self._clock())
             for subscription_id, subscription in self._subscriptions.items():
                 if subscription.topic != topic:
                     continue
@@ -127,9 +159,12 @@ class SubscriptionHub:
         subscription_id = _require_nonempty_string("subscription_id", subscription_id)
         limit = _require_event_limit(limit)
         with self._lock:
+            now = self._clock()
+            self._expire_locked(now)
             subscription = self._subscriptions.get(subscription_id)
             if subscription is None:
                 raise JsonRpcError(INVALID_PARAMS, "Unknown subscription")
+            self._expires_at[subscription_id] = now + self.ttl_seconds
             queue = self._events[subscription_id]
             events: list[JsonValue] = []
             while queue and len(events) < limit:
@@ -139,6 +174,36 @@ class SubscriptionHub:
             "topic": subscription.topic,
             "events": events,
         }
+
+    def unsubscribe(self, subscription_id: str) -> JsonObject:
+        """Remove a subscription and its pending event queue."""
+
+        subscription_id = _require_nonempty_string("subscription_id", subscription_id)
+        with self._lock:
+            self._expire_locked(self._clock())
+            subscription = self._subscriptions.get(subscription_id)
+            if subscription is None:
+                raise JsonRpcError(INVALID_PARAMS, "Unknown subscription")
+            self._drop_locked(subscription_id)
+        return {
+            "subscription_id": subscription.subscription_id,
+            "topic": subscription.topic,
+            "unsubscribed": True,
+        }
+
+    def _expire_locked(self, now: float) -> None:
+        expired = [
+            subscription_id
+            for subscription_id, expires_at in self._expires_at.items()
+            if expires_at <= now
+        ]
+        for subscription_id in expired:
+            self._drop_locked(subscription_id)
+
+    def _drop_locked(self, subscription_id: str) -> None:
+        self._subscriptions.pop(subscription_id, None)
+        self._events.pop(subscription_id, None)
+        self._expires_at.pop(subscription_id, None)
 
 
 @runtime_checkable
@@ -461,6 +526,11 @@ class JsonRpcServer:
 
         return self.subscriptions.drain(subscription_id, limit=limit)
 
+    def unsubscribe(self, subscription_id: str) -> JsonObject:
+        """Remove a local subscription and pending events."""
+
+        return self.subscriptions.unsubscribe(subscription_id)
+
     def openrpc_document(self) -> JsonObject:
         """Return the OpenRPC document served by ``GET /openrpc.json``."""
 
@@ -539,6 +609,9 @@ class JsonRpcServer:
                 "transport": "http-poll",
                 "events_path": f"/subscriptions/{subscription.subscription_id}/events",
             }
+        if method == "unsubscribe":
+            params = _params(raw_params, required=("subscription_id",))
+            return self.unsubscribe(_string_param(params, "subscription_id"))
         raise JsonRpcError(METHOD_NOT_FOUND, "Method not found")
 
 
@@ -862,6 +935,12 @@ def openrpc_document() -> JsonObject:
                 "subscribe",
                 "Create a local topic subscription and return an event-drain endpoint.",
                 (("topic", {"type": "string", "minLength": 1}, True),),
+                _object_schema(),
+            ),
+            _openrpc_method(
+                "unsubscribe",
+                "Remove a local topic subscription and discard queued events.",
+                (("subscription_id", {"type": "string", "minLength": 1}, True),),
                 _object_schema(),
             ),
         ],
@@ -1537,13 +1616,16 @@ __all__ = [
     "INVALID_PARAMS",
     "INVALID_REQUEST",
     "JSONRPC_VERSION",
+    "MAX_EVENTS_PER_SUBSCRIPTION",
     "MAX_GETUTXOS_LIMIT",
     "MAX_HTTP_BODY_BYTES",
     "MAX_JSON_RPC_BATCH_SIZE",
     "MAX_RPC_CONNECTIONS",
+    "MAX_SUBSCRIPTIONS",
     "METHOD_NOT_FOUND",
     "PARSE_ERROR",
     "RPC_REQUEST_TIMEOUT_SECONDS",
+    "SUBSCRIPTION_TTL_SECONDS",
     "InMemoryRpcBackend",
     "JsonObject",
     "JsonRpcError",

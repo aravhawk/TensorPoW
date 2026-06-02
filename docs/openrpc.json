@@ -207,6 +207,26 @@
           "type": "object"
         }
       }
+    },
+    {
+      "name": "unsubscribe",
+      "description": "Remove a local topic subscription and discard queued events.",
+      "params": [
+        {
+          "name": "subscription_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      }
     }
   ]
 }

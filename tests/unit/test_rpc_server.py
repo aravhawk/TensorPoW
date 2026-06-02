@@ -17,7 +17,9 @@ from tensorpow.rpc.server import (
     METHOD_NOT_FOUND,
     PARSE_ERROR,
     InMemoryRpcBackend,
+    JsonRpcError,
     JsonRpcServer,
+    SubscriptionHub,
 )
 from tensorpow.state import TEMPLATE_PKH, UTXO, Outpoint, UTXOSet
 from tensorpow.tx.script import pubkey_hash
@@ -81,6 +83,76 @@ def test_all_rpc_methods_return_project_shaped_results() -> None:
     assert drained["events"] == [
         {"topic": "tensorpow/fruits/main", "payload": {"block_hash": block_hash.hex()}}
     ]
+
+
+def test_subscriptions_are_capped_bounded_and_unsubscribable() -> None:
+    hub = SubscriptionHub(
+        max_subscriptions=2,
+        max_events_per_subscription=2,
+        ttl_seconds=60.0,
+    )
+    server = JsonRpcServer(InMemoryRpcBackend(), subscription_hub=hub)
+
+    first = _rpc(server, "subscribe", {"topic": "tensorpow/fruits/main"})
+    second = _rpc(server, "subscribe", {"topic": "tensorpow/fruits/main"})
+    assert (
+        _error_code(
+            _handle(
+                server,
+                {
+                    "jsonrpc": "2.0",
+                    "method": "subscribe",
+                    "params": {"topic": "tensorpow/fruits/main"},
+                    "id": "third",
+                },
+            )
+        )
+        == INVALID_PARAMS
+    )
+
+    for sequence in range(3):
+        assert server.publish("tensorpow/fruits/main", {"sequence": sequence}) == 2
+
+    drained = server.drain_subscription(str(first["subscription_id"]), limit=10)
+    events = drained["events"]
+    assert isinstance(events, list)
+    assert [event["payload"] for event in events if isinstance(event, dict)] == [
+        {"sequence": 1},
+        {"sequence": 2},
+    ]
+
+    unsubscribed = _rpc(
+        server,
+        "unsubscribe",
+        {"subscription_id": str(second["subscription_id"])},
+    )
+    assert unsubscribed["unsubscribed"] is True
+    replacement = _rpc(server, "subscribe", {"topic": "tensorpow/fruits/main"})
+    assert replacement["subscription_id"] != second["subscription_id"]
+
+
+def test_subscription_ttl_expires_idle_entries() -> None:
+    current_time = 0.0
+
+    def clock() -> float:
+        return current_time
+
+    hub = SubscriptionHub(
+        max_subscriptions=1,
+        max_events_per_subscription=1,
+        ttl_seconds=1.0,
+        clock=clock,
+    )
+    server = JsonRpcServer(InMemoryRpcBackend(), subscription_hub=hub)
+    subscription = _rpc(server, "subscribe", {"topic": "tensorpow/fruits/main"})
+
+    current_time = 2.0
+
+    assert server.publish("tensorpow/fruits/main", {"sequence": 0}) == 0
+    with pytest.raises(JsonRpcError, match="Unknown subscription"):
+        server.drain_subscription(str(subscription["subscription_id"]))
+    replacement = _rpc(server, "subscribe", {"topic": "tensorpow/fruits/main"})
+    assert replacement["subscription_id"] != subscription["subscription_id"]
 
 
 def test_malformed_requests_return_clean_json_rpc_errors() -> None:
