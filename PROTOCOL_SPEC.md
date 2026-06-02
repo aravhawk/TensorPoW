@@ -355,9 +355,10 @@ reserved_dynamic_k = clamp(
 `DYNAMIC_K_OBSERVATION_ANCHORS`. `observed_d_max_ms` is the network propagation
 delay estimate bounded by `DYNAMIC_K_D_MAX_MIN_MS` and
 `DYNAMIC_K_D_MAX_MAX_MS`. `delta` is `DYNAMIC_K_DELTA_NUM /
-DYNAMIC_K_DELTA_DEN`. These values are advisory/reserved in this version; an
-implementation that feeds local wall-clock or network measurements into
-consensus K is non-conformant.
+DYNAMIC_K_DELTA_DEN`. Reserved dynamic-K numeric inputs MUST be exact integer or
+decimal-rational values; binary floating-point values are non-conformant. These
+values are advisory/reserved in this version; an implementation that feeds local
+wall-clock or network measurements into consensus K is non-conformant.
 
 GHOSTDAG classification follows the greedy algorithm from PHANTOM/GHOSTDAG:
 

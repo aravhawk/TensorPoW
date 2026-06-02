@@ -4,13 +4,22 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, Decimal, InvalidOperation, localcontext
+from decimal import (
+    ROUND_CEILING,
+    ROUND_HALF_EVEN,
+    Context,
+    Decimal,
+    DivisionByZero,
+    InvalidOperation,
+    Overflow,
+    localcontext,
+)
 from typing import Final
 
 from tensorpow.crypto.hash import HASH_LEN_BYTES
 
 FruitHash = bytes
-Numeric = int | float | Decimal
+Numeric = int | Decimal
 
 MS_PER_SECOND: Final[int] = 1000
 DYNAMIC_K_FACTOR: Final[int] = 2
@@ -18,8 +27,14 @@ DYNAMIC_K_MIN: Final[int] = 15
 DYNAMIC_K_MAX: Final[int] = 10000
 DYNAMIC_K_DELTA_NUM: Final[int] = 1
 DYNAMIC_K_DELTA_DEN: Final[int] = 1000000
+DYNAMIC_K_OBSERVATION_ANCHORS: Final[int] = 100
 DYNAMIC_K_D_MAX_MIN_MS: Final[int] = 100
 DYNAMIC_K_D_MAX_MAX_MS: Final[int] = 5000
+_DYNAMIC_K_DECIMAL_CONTEXT: Final[Context] = Context(
+    prec=80,
+    rounding=ROUND_HALF_EVEN,
+    traps=[InvalidOperation, DivisionByZero, Overflow],
+)
 
 U64_MAX: Final[int] = 0xFFFFFFFFFFFFFFFF
 
@@ -249,25 +264,27 @@ def compute_k(
     observed_lambda: Numeric,
     observed_d_max_ms: Numeric,
     delta: Numeric | None = None,
+    *,
+    observation_anchors: int = DYNAMIC_K_OBSERVATION_ANCHORS,
 ) -> int:
-    """Compute dynamic K with deterministic decimal arithmetic."""
+    """Compute reserved dynamic K with exact, window-pinned decimal arithmetic."""
 
+    _require_dynamic_k_observation_anchors(observation_anchors)
     lambda_dec = _require_nonnegative_decimal("observed_lambda", observed_lambda)
     d_max_dec = _require_positive_decimal("observed_d_max_ms", observed_d_max_ms)
-    delta_dec = (
-        Decimal(DYNAMIC_K_DELTA_NUM) / Decimal(DYNAMIC_K_DELTA_DEN)
-        if delta is None
-        else _require_positive_decimal("delta", delta)
-    )
-    if delta_dec >= 1:
-        raise ValueError("delta must be less than one")
+    with localcontext(_DYNAMIC_K_DECIMAL_CONTEXT) as context:
+        context.clear_flags()
+        delta_dec = (
+            Decimal(DYNAMIC_K_DELTA_NUM) / Decimal(DYNAMIC_K_DELTA_DEN)
+            if delta is None
+            else _require_positive_decimal("delta", delta)
+        )
+        if delta_dec >= 1:
+            raise ValueError("delta must be less than one")
 
-    min_delay = Decimal(DYNAMIC_K_D_MAX_MIN_MS)
-    max_delay = Decimal(DYNAMIC_K_D_MAX_MAX_MS)
-    bounded_delay = min(max(d_max_dec, min_delay), max_delay)
-
-    with localcontext() as context:
-        context.prec = 80
+        min_delay = Decimal(DYNAMIC_K_D_MAX_MIN_MS)
+        max_delay = Decimal(DYNAMIC_K_D_MAX_MAX_MS)
+        bounded_delay = min(max(d_max_dec, min_delay), max_delay)
         raw = (
             Decimal(DYNAMIC_K_FACTOR)
             * lambda_dec
@@ -341,6 +358,13 @@ def _require_k(k: int) -> None:
         raise ValueError("k must be non-negative")
 
 
+def _require_dynamic_k_observation_anchors(value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError("observation_anchors must be int")
+    if value != DYNAMIC_K_OBSERVATION_ANCHORS:
+        raise ValueError("observation_anchors must equal DYNAMIC_K_OBSERVATION_ANCHORS")
+
+
 def _require_nonnegative_decimal(name: str, value: Numeric) -> Decimal:
     number = _decimal_from_numeric(name, value)
     if number < 0:
@@ -356,10 +380,10 @@ def _require_positive_decimal(name: str, value: Numeric) -> Decimal:
 
 
 def _decimal_from_numeric(name: str, value: Numeric) -> Decimal:
-    if isinstance(value, bool) or not isinstance(value, int | float | Decimal):
-        raise TypeError(f"{name} must be int, float, or Decimal")
+    if isinstance(value, bool) or not isinstance(value, int | Decimal):
+        raise TypeError(f"{name} must be int or Decimal")
     try:
-        number = Decimal(str(value))
+        number = value if isinstance(value, Decimal) else Decimal(value)
     except InvalidOperation as error:
         raise ValueError(f"{name} must be finite") from error
     if not number.is_finite():

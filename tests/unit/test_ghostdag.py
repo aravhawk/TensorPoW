@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal, localcontext
 
 import pytest
 
 from tensorpow.consensus.ghostdag import (
+    DYNAMIC_K_OBSERVATION_ANCHORS,
     BlockDAG,
     FruitBlock,
     blue_set,
@@ -23,6 +24,14 @@ def _h(index: int) -> bytes:
 def test_compute_k_matches_reference_and_clamps_bounds() -> None:
     assert compute_k(35, 1000) == 968
     assert compute_k(Decimal("35"), Decimal("10")) == 97
+    assert (
+        compute_k(
+            Decimal("35"),
+            Decimal("1000"),
+            observation_anchors=DYNAMIC_K_OBSERVATION_ANCHORS,
+        )
+        == 968
+    )
     assert compute_k(0, 1000) == 15
     assert compute_k(1_000_000, 5000) == 10000
 
@@ -31,9 +40,18 @@ def test_compute_k_matches_reference_and_clamps_bounds() -> None:
     with pytest.raises(ValueError, match="positive"):
         compute_k(1, 1000, 0)
     with pytest.raises(ValueError, match="finite"):
-        compute_k(float("nan"), 1000)
+        compute_k(Decimal("NaN"), 1000)
+    with pytest.raises(TypeError, match="int or Decimal"):
+        compute_k(1.5, 1000)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
-        compute_k(True, 1000)  # type: ignore[arg-type]
+        compute_k(True, 1000)
+    with pytest.raises(ValueError, match="observation_anchors"):
+        compute_k(1, 1000, observation_anchors=DYNAMIC_K_OBSERVATION_ANCHORS - 1)
+
+    with localcontext() as context:
+        context.prec = 5
+        context.rounding = ROUND_FLOOR
+        assert compute_k(Decimal("35"), Decimal("1000")) == 968
 
 
 def test_linear_dag_is_all_blue_and_topologically_ordered() -> None:
