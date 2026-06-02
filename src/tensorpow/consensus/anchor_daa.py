@@ -26,6 +26,7 @@ WTEMA_WINDOW_ANCHORS: Final[int] = 100
 WTEMA_ALPHA_NUM: Final[int] = 1
 WTEMA_ALPHA_DEN: Final[int] = 8
 WTEMA_MAX_ADJUSTMENT_FACTOR: Final[int] = 4
+WTEMA_TARGET_HISTORY_RECORDS: Final[int] = WTEMA_WINDOW_ANCHORS + 1
 
 FIXED_POINT_SCALE: Final[int] = 1 << 64
 
@@ -51,7 +52,7 @@ class AnchorRecord:
 
 
 def next_anchor_target(history: Sequence[AnchorRecord]) -> bytes:
-    """Return the target for the next anchor on a parent-chain history."""
+    """Return the target for the next anchor from the bounded WTEMA history suffix."""
 
     records = _normalize_history(history)
     if not records:
@@ -100,7 +101,8 @@ def _normalize_history(history: object) -> tuple[AnchorRecord, ...]:
         raise TypeError("history must be a sequence of AnchorRecord")
     if not isinstance(history, Sequence):
         raise TypeError("history must be a sequence of AnchorRecord")
-    records = tuple(history)
+    start = max(0, len(history) - WTEMA_TARGET_HISTORY_RECORDS)
+    records = tuple(history[index] for index in range(start, len(history)))
     for record in records:
         if not isinstance(record, AnchorRecord):
             raise TypeError("history must contain only AnchorRecord values")
@@ -185,6 +187,7 @@ __all__ = [
     "WTEMA_ALPHA_DEN",
     "WTEMA_ALPHA_NUM",
     "WTEMA_MAX_ADJUSTMENT_FACTOR",
+    "WTEMA_TARGET_HISTORY_RECORDS",
     "WTEMA_WINDOW_ANCHORS",
     "AnchorRecord",
     "anchor_work_weight",

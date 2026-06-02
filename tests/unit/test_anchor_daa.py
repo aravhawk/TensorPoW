@@ -6,12 +6,14 @@ from itertools import pairwise
 
 import pytest
 
+import tensorpow.consensus.anchor_daa as anchor_daa
 from tensorpow.consensus.anchor_daa import (
     ANCHOR_INITIAL_TARGET_LE,
     ANCHOR_INTERVAL_MS,
     ANCHOR_MAX_TARGET_LE,
     ANCHOR_MIN_TARGET_LE,
     GENESIS_PARENT_HASH,
+    WTEMA_TARGET_HISTORY_RECORDS,
     AnchorRecord,
     anchor_work_weight,
     int_to_target,
@@ -77,6 +79,32 @@ def test_wtema_moves_monotonically_under_sustained_hashrate_change() -> None:
         targets.append(target_to_int(next_anchor_target(history)))
 
     assert all(later < earlier for earlier, later in pairwise(targets))
+
+
+def test_next_anchor_target_validates_only_wtema_history_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history = [_record(1, GENESIS_PARENT_HASH, 0, ANCHOR_INITIAL_TARGET_LE)]
+    for index in range(2, WTEMA_TARGET_HISTORY_RECORDS + 25):
+        history.append(
+            _record(
+                index,
+                history[-1].anchor_hash,
+                (index - 1) * ANCHOR_INTERVAL_MS,
+                ANCHOR_INITIAL_TARGET_LE,
+            )
+        )
+    seen_lengths: list[int] = []
+    validate_parent_chain = anchor_daa._validate_parent_chain
+
+    def spy_validate_parent_chain(records: tuple[AnchorRecord, ...]) -> None:
+        seen_lengths.append(len(records))
+        validate_parent_chain(records)
+
+    monkeypatch.setattr(anchor_daa, "_validate_parent_chain", spy_validate_parent_chain)
+
+    assert next_anchor_target(history) == ANCHOR_INITIAL_TARGET_LE
+    assert seen_lengths == [WTEMA_TARGET_HISTORY_RECORDS]
 
 
 def test_target_bounds_and_reward_weight_are_enforced() -> None:
