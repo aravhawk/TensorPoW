@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+import tensorpow.crypto.hash as hash_module
 from tensorpow.crypto.hash import (
     HASH_LEN_BYTES,
-    MerkleProof,
-    MerkleTree,
     derive_key,
     domain_hash,
     hash_bytes,
@@ -48,48 +47,6 @@ def test_hash_helpers_validate_inputs() -> None:
         derive_key("", b"material")
 
 
-def test_merkle_tree_empty_single_and_mutation_roots() -> None:
-    tree = MerkleTree()
-    empty_root = tree.root()
-    assert len(empty_root) == HASH_LEN_BYTES
-
-    key = hash_bytes(b"outpoint-0")
-    value = hash_bytes(b"utxo-0")
-    tree.set(key, value)
-    single_root = tree.root()
-    assert single_root != empty_root
-
-    tree.delete(key)
-    assert tree.root() == empty_root
-
-
-def test_merkle_tree_power_of_two_and_non_power_of_two_roots() -> None:
-    power_items = {
-        hash_bytes(f"key-{i}".encode()): hash_bytes(f"value-{i}".encode()) for i in range(4)
-    }
-    non_power_items = {
-        hash_bytes(f"key-{i}".encode()): hash_bytes(f"value-{i}".encode()) for i in range(5)
-    }
-    assert MerkleTree(power_items).root() == MerkleTree(dict(reversed(power_items.items()))).root()
-    assert MerkleTree(power_items).root() != MerkleTree(non_power_items).root()
-
-
-def test_merkle_tree_inclusion_proof_verifies_and_detects_tampering() -> None:
-    items = {hash_bytes(f"key-{i}".encode()): hash_bytes(f"value-{i}".encode()) for i in range(5)}
-    tree = MerkleTree(items)
-    key, value = next(iter(items.items()))
-    proof = tree.inclusion_proof(key)
-
-    assert proof.value == value
-    assert MerkleTree.verify_proof(proof, tree.root())
-
-    bad_proof = MerkleProof(key=proof.key, value=hash_bytes(b"wrong"), siblings=proof.siblings)
-    assert not MerkleTree.verify_proof(bad_proof, tree.root())
-
-
-def test_merkle_tree_rejects_malformed_keys_and_missing_proofs() -> None:
-    tree = MerkleTree()
-    with pytest.raises(ValueError):
-        tree.set(b"short", hash_bytes(b"value"))
-    with pytest.raises(KeyError):
-        tree.inclusion_proof(hash_bytes(b"missing"))
+def test_crypto_hash_does_not_expose_sparse_merkle_tree_trap() -> None:
+    assert not hasattr(hash_module, "MerkleTree")
+    assert not hasattr(hash_module, "MerkleProof")
