@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import tomllib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -496,7 +496,7 @@ class TensorPowNode:
         if anchor.header.timestamp_ms > _now_ms() + MAX_FUTURE_DRIFT_MS:
             return "anchor_time_too_new"
         if is_genesis_anchor:
-            if self.store.items(COLUMN_BODIES):
+            if next(self.store.items(COLUMN_BODIES), None) is not None:
                 return "genesis_not_first"
             if self.config.expected_genesis_hash is None:
                 return "missing_expected_genesis_hash"
@@ -1137,7 +1137,7 @@ class TensorPowNode:
         with self._state_lock:
             return tuple(entry.tx for entry in self.mempool.entries())
 
-    def _rebuild_mempool(self, transactions: tuple[Transaction, ...]) -> Mempool:
+    def _rebuild_mempool(self, transactions: Iterable[Transaction]) -> Mempool:
         mempool = Mempool(
             shard_tree=self.shard_tree,
             utxo_view=self.utxo_set,
@@ -1295,7 +1295,7 @@ class TensorPowNode:
 
         with self._state_lock:
             return {
-                "blocks": len(self.store.items(COLUMN_BODIES)),
+                "blocks": sum(1 for _ in self.store.items(COLUMN_BODIES)),
                 "mempool": len(self.mempool),
                 "peers": 0 if self.network_node is None else 1,
                 "running": self.running,

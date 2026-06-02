@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import rmtree
@@ -224,19 +224,18 @@ class RocksDBStore:
             write_batch.delete(delete.key, self._handles[delete.column])
         self._db.write(write_batch)
 
-    def items(self, column: StorageColumn) -> tuple[tuple[bytes, bytes], ...]:
-        """Return all items in one column ordered by raw key bytes."""
+    def items(self, column: StorageColumn) -> Iterator[tuple[bytes, bytes]]:
+        """Iterate over items in one column in RocksDB's raw-key order."""
 
         column = _require_column(column)
-        return tuple(
-            sorted(
-                (
-                    _require_bytes("key", cast(bytes, key)),
-                    _require_bytes("value", cast(bytes, value)),
-                )
-                for key, value in self._columns[column].items()
+        return self._iter_items(column)
+
+    def _iter_items(self, column: StorageColumn) -> Iterator[tuple[bytes, bytes]]:
+        for key, value in self._columns[column].items():
+            yield (
+                _require_bytes("key", cast(bytes, key)),
+                _require_bytes("value", cast(bytes, value)),
             )
-        )
 
     def create_checkpoint(self, checkpoint_path: str | Path, *, replace: bool = False) -> Path:
         """Create a physical RocksDB checkpoint and return its path."""
@@ -305,10 +304,10 @@ class RocksDBStore:
             raise TypeError("outpoint must be Outpoint")
         self.delete(COLUMN_UTXO, outpoint.key())
 
-    def utxos(self) -> tuple[UTXO, ...]:
-        """Return all persisted UTXOs in deterministic key order."""
+    def utxos(self) -> Iterator[UTXO]:
+        """Iterate over persisted UTXOs in deterministic key order."""
 
-        return tuple(
+        return (
             UTXO.from_bytes(value, expected_outpoint_key=key)
             for key, value in self.items(COLUMN_UTXO)
         )
@@ -320,10 +319,10 @@ class RocksDBStore:
             raise TypeError("tx must be Transaction")
         self.put(COLUMN_MEMPOOL, tx.tx_id(), tx.to_bytes())
 
-    def mempool_txs(self) -> tuple[Transaction, ...]:
-        """Return all persisted mempool transactions in tx-id order."""
+    def mempool_txs(self) -> Iterator[Transaction]:
+        """Iterate over persisted mempool transactions in tx-id order."""
 
-        return tuple(Transaction.from_bytes(value) for _, value in self.items(COLUMN_MEMPOOL))
+        return (Transaction.from_bytes(value) for _, value in self.items(COLUMN_MEMPOOL))
 
     def put_shard_tree(self, tree: ShardTree) -> None:
         """Persist current shard tree state."""

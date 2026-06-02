@@ -20,6 +20,7 @@ from tensorpow.state.utxo import TEMPLATE_PKH, UTXO, Outpoint
 from tensorpow.storage import (
     BENCHMARK_MIN_WRITES_PER_SEC,
     COLUMN_DAG,
+    COLUMN_FEE_FLOORS,
     COLUMN_MEMPOOL,
     BatchDelete,
     BatchPut,
@@ -57,8 +58,8 @@ def test_column_families_and_typed_round_trip(tmp_path: Path) -> None:
     assert reopened.get_header_bytes(block_hash) == fruit.header.serialize()
     assert reopened.get_body_bytes(block_hash) == fruit.serialize()
     assert reopened.get_utxo(outpoint) == utxo
-    assert reopened.utxos() == (utxo,)
-    assert reopened.mempool_txs() == (tx,)
+    assert tuple(reopened.utxos()) == (utxo,)
+    assert tuple(reopened.mempool_txs()) == (tx,)
     assert reopened.get_shard_tree() == ShardTree()
     assert reopened.fee_floor(ROOT_SHARD_ID) == 123
     reopened.close()
@@ -97,7 +98,7 @@ def test_atomic_batch_applies_all_or_none(tmp_path: Path) -> None:
         )
     )
     assert store.get(COLUMN_DAG, b"marker") == b"ok"
-    assert store.mempool_txs() == ()
+    assert tuple(store.mempool_txs()) == ()
     store.close()
 
 
@@ -141,6 +142,39 @@ def test_close_releases_handles_when_flush_fails(
     reopened = RocksDBStore(db_path)
     assert reopened.get(COLUMN_DAG, b"k") == b"value"
     reopened.close()
+
+
+def test_items_and_typed_views_stream_without_python_sort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RocksDBStore(tmp_path / "db")
+    tx = _tx(4)
+    outpoint = Outpoint(tx.tx_id(), 0)
+    utxo = UTXO(
+        outpoint=outpoint,
+        amount_matoms=4,
+        template_id=TEMPLATE_PKH,
+        owner_pubkey_hash=bytes([4]) * 32,
+        payload=bytes([4]) * 32,
+    )
+    store.put(COLUMN_FEE_FLOORS, b"b", b"second")
+    store.put(COLUMN_FEE_FLOORS, b"a", b"first")
+    store.put_utxo(utxo)
+    store.put_mempool_tx(tx)
+
+    def fail_sorted(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("storage iterators must not use Python sorted()")
+
+    monkeypatch.setattr("builtins.sorted", fail_sorted)
+
+    assert list(store.items(COLUMN_FEE_FLOORS)) == [
+        (b"a", b"first"),
+        (b"b", b"second"),
+    ]
+    assert list(store.utxos()) == [utxo]
+    assert list(store.mempool_txs()) == [tx]
+    store.close()
 
 
 def test_reopen_after_killed_writer_preserves_batch_consistency(tmp_path: Path) -> None:
