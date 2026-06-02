@@ -305,6 +305,7 @@ def _execute_checkmultisig(stack: list[bytes], context: ScriptContext) -> bool:
     for public_key in public_keys:
         if len(public_key) != ED25519_PUBLIC_KEY_BYTES:
             raise ScriptError("multisig public key must be 32 bytes")
+    _require_distinct_multisig_keys(public_keys)
 
     threshold = _decode_small_int(_pop(stack, "OP_CHECKMULTISIG"), "threshold")
     if not 1 <= threshold <= pubkey_count:
@@ -334,6 +335,7 @@ def _parse_multisig_payload(payload: bytes) -> tuple[int, tuple[bytes, ...]]:
         payload[offset : offset + ED25519_PUBLIC_KEY_BYTES]
         for offset in range(2, len(payload), ED25519_PUBLIC_KEY_BYTES)
     )
+    _require_distinct_multisig_keys(public_keys)
     return threshold, public_keys
 
 
@@ -362,6 +364,11 @@ def _verify_ordered_multisig(
         if not matched:
             return False
     return True
+
+
+def _require_distinct_multisig_keys(public_keys: tuple[bytes, ...]) -> None:
+    if len(set(public_keys)) != len(public_keys):
+        raise ScriptError("multisig public keys must be distinct")
 
 
 def _verify_signature(context: ScriptContext, signature: bytes, public_key: bytes) -> bool:

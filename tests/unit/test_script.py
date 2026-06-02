@@ -76,6 +76,10 @@ def test_multisig_template_accepts_ordered_threshold_signatures() -> None:
     assert verify_template(TEMPLATE_MULTISIG, payload, witness, MESSAGE)
     assert not verify_template(TEMPLATE_MULTISIG, payload, SIG2 + SIG1, MESSAGE)
     assert not verify_template(TEMPLATE_MULTISIG, payload, SIG1, MESSAGE)
+    duplicate_payload = bytes((2, 2)) + PUB1 + PUB1
+    with pytest.raises(ScriptError, match="distinct"):
+        validate_template_payload(TEMPLATE_MULTISIG, duplicate_payload)
+    assert not verify_template(TEMPLATE_MULTISIG, duplicate_payload, SIG1 + SIG1, MESSAGE)
 
     with pytest.raises(ScriptError, match="threshold"):
         validate_template_payload(TEMPLATE_MULTISIG, bytes((0, 1)) + PUB1)
@@ -162,6 +166,17 @@ def test_script_vm_rejects_malformed_programs_and_stack_shapes() -> None:
             context,
             initial_stack=(b"x" * (ED25519_SIGNATURE_BYTES - 1), b"\x01", PUB1),
         )
+    duplicate_multisig = (
+        encode_push(SIG1)
+        + encode_push(SIG1)
+        + encode_push(b"\x02")
+        + encode_push(PUB1)
+        + encode_push(PUB1)
+        + encode_push(b"\x02")
+        + bytes((OP_CHECKMULTISIG,))
+    )
+    with pytest.raises(ScriptError, match="distinct"):
+        execute_script(duplicate_multisig, context)
 
 
 def test_utxo_template_spend_uses_utxo_payload_and_locks() -> None:

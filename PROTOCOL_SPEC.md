@@ -605,7 +605,7 @@ Active output templates:
   `OP_CHECKSIG`.
 - `TEMPLATE_MULTISIG`: payload is `threshold || pubkey_count || pubkeys`.
   `pubkey_count` MUST be `<= MULTISIG_MAX_KEYS`, and threshold MUST be in
-  `[1, pubkey_count]`.
+  `[1, pubkey_count]`. Public keys MUST be distinct.
 - `TEMPLATE_HASHLOCK`: payload is `hash || inner_template_payload`. Witness
   MUST reveal a preimage whose BLAKE3 hash matches, then satisfy the inner
   template.

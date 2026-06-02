@@ -181,6 +181,8 @@ def test_transaction_rejects_zero_outputs_and_bad_component_shapes() -> None:
         Output(1, TEMPLATE_PKH, payload=bytes(31))
     with pytest.raises(ValueError, match="multisig"):
         Output(1, TEMPLATE_MULTISIG, payload=bytes(32))
+    with pytest.raises(ValueError, match="distinct"):
+        Output(1, TEMPLATE_MULTISIG, payload=bytes((2, 2)) + bytes(32) + bytes(32))
     with pytest.raises(ValueError, match="hashlock"):
         Output(1, TEMPLATE_HASHLOCK, payload=bytes(32))
 

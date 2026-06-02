@@ -401,6 +401,12 @@ def _require_multisig_payload(payload: bytes) -> None:
     expected_len = 2 + pubkey_count * ED25519_PUBLIC_KEY_BYTES
     if len(payload) != expected_len:
         raise ValueError("multisig template payload length mismatch")
+    public_keys = tuple(
+        payload[offset : offset + ED25519_PUBLIC_KEY_BYTES]
+        for offset in range(2, len(payload), ED25519_PUBLIC_KEY_BYTES)
+    )
+    if len(set(public_keys)) != len(public_keys):
+        raise ValueError("multisig template public keys must be distinct")
 
 
 def _require_u8(name: str, value: int) -> None:
