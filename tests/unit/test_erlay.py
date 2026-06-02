@@ -10,6 +10,7 @@ from tensorpow.net.erlay import (
     CODEC_ERLAY,
     ERLAY_FIELD_BITS,
     ERLAY_INTERVAL_MS,
+    ERLAY_MAX_DECODE_CAPACITY,
     ERLAY_SKETCH_MAGIC,
     ErlayPeerState,
     ErlaySetDifference,
@@ -103,6 +104,19 @@ def test_malformed_sketches_reject_lengths_and_fields() -> None:
     for raw in malformed:
         with pytest.raises(ErlaySketchError):
             ErlaySketch.from_bytes(raw)
+
+
+def test_remote_sketch_capacity_is_capped_before_decode() -> None:
+    oversized = ErlaySketch.from_short_ids(
+        ROOT_SHARD_ID,
+        (),
+        capacity=ERLAY_MAX_DECODE_CAPACITY + 1,
+    )
+
+    with pytest.raises(ErlaySketchError, match="decode limit"):
+        ErlaySketch.from_bytes(oversized.to_bytes())
+    with pytest.raises(ErlaySketchError, match="decode limit"):
+        oversized.decode_short_ids()
 
 
 def test_per_shard_separation_and_round_timing_are_independent() -> None:

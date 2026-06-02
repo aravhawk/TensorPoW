@@ -21,6 +21,7 @@ ERLAY_FIELD_BITS: Final[int] = 64
 ERLAY_FIELD_BYTES: Final[int] = ERLAY_FIELD_BITS // 8
 ERLAY_DEFAULT_CAPACITY: Final[int] = 32
 ERLAY_MAX_CAPACITY: Final[int] = 1024
+ERLAY_MAX_DECODE_CAPACITY: Final[int] = ERLAY_DEFAULT_CAPACITY
 ERLAY_MAX_PEER_ID_BYTES: Final[int] = 512
 ERLAY_SKETCH_MAGIC: Final[bytes] = b"TPERLAY"
 ERLAY_SKETCH_HEADER_BYTES: Final[int] = (
@@ -108,7 +109,12 @@ class ErlaySketch:
         return cls.from_short_ids(shard_id, short_ids, capacity=capacity)
 
     @classmethod
-    def from_bytes(cls, data: bytes) -> ErlaySketch:
+    def from_bytes(
+        cls,
+        data: bytes,
+        *,
+        max_decode_capacity: int = ERLAY_MAX_DECODE_CAPACITY,
+    ) -> ErlaySketch:
         """Decode canonical Erlay sketch bytes and reject malformed fields."""
 
         _require_bytes("data", data)
@@ -141,6 +147,7 @@ class ErlaySketch:
             _require_capacity(capacity)
         except ValueError as exc:
             raise ErlaySketchError("Erlay sketch capacity is invalid") from exc
+        _require_decode_capacity(capacity, max_decode_capacity)
 
         syndrome_count = _read_u16(data, offset)
         offset += U16_BYTES
@@ -187,9 +194,14 @@ class ErlaySketch:
             ),
         )
 
-    def decode_short_ids(self) -> tuple[int, ...]:
+    def decode_short_ids(
+        self,
+        *,
+        max_capacity: int = ERLAY_MAX_DECODE_CAPACITY,
+    ) -> tuple[int, ...]:
         """Decode this sketch as a bounded symmetric-difference set."""
 
+        _require_decode_capacity(self.capacity, max_capacity)
         short_ids = _decode_syndromes(self.syndromes, self.capacity)
         if _syndromes_for_short_ids(short_ids, self.capacity) != self.syndromes:
             raise ErlaySketchError("Erlay sketch does not decode canonically")
@@ -703,6 +715,14 @@ def _require_capacity(value: int) -> int:
     return value
 
 
+def _require_decode_capacity(capacity: int, max_capacity: int) -> int:
+    capacity = _require_capacity(capacity)
+    max_capacity = _require_capacity(max_capacity)
+    if capacity > max_capacity:
+        raise ErlaySketchError("Erlay sketch capacity exceeds decode limit")
+    return capacity
+
+
 def _require_field_element(name: str, value: int, *, allow_zero: bool) -> None:
     if not isinstance(value, int) or isinstance(value, bool):
         raise TypeError(f"{name} must be int")
@@ -783,6 +803,7 @@ __all__ = [
     "ERLAY_FIELD_BITS",
     "ERLAY_INTERVAL_MS",
     "ERLAY_MAX_CAPACITY",
+    "ERLAY_MAX_DECODE_CAPACITY",
     "ERLAY_SKETCH_HEADER_BYTES",
     "ERLAY_SKETCH_MAGIC",
     "ErlayPeerState",
