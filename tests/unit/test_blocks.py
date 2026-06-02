@@ -12,6 +12,7 @@ from tensorpow.chain.blocks import (
     Fruit,
     anchor_reward_root,
     fee_floor_set_root,
+    fruit_payload_size_bytes,
     fruit_set_root,
     parent_candidate_root,
     tx_merkle_root,
@@ -92,6 +93,11 @@ def test_fruit_body_rejects_empty_oversized_trailing_and_truncated_payloads() ->
         _fruit(())
     with pytest.raises(ValueError, match="payload"):
         _fruit((b"x" * (MAX_FRUIT_PAYLOAD_BYTES + 1),))
+    exact_payload = (b"x" * (MAX_FRUIT_PAYLOAD_BYTES - 4),)
+    assert fruit_payload_size_bytes(exact_payload) == MAX_FRUIT_PAYLOAD_BYTES
+    assert _fruit(exact_payload).transactions == exact_payload
+    with pytest.raises(ValueError, match="payload"):
+        _fruit((b"x" * (MAX_FRUIT_PAYLOAD_BYTES - 1),))
 
     serialized = _fruit().serialize()
     with pytest.raises(BlockDecodeError, match="trailing"):

@@ -29,6 +29,7 @@ from tensorpow.tx.transaction import Output, TxDecodeError
 
 MAX_FRUIT_PAYLOAD_BYTES: Final[int] = 8192
 MIN_FRUIT_TX_COUNT: Final[int] = 1
+U16_BYTES: Final[int] = 2
 PARENT_CANDIDATE_MAX_COUNT: Final[int] = 10_000
 SHARD_TREE_MAX_BYTES: Final[int] = 262_144
 _GENESIS_ROOT_FEE_FLOOR_MATOMS_PER_KB: Final[int] = 0
@@ -51,7 +52,7 @@ class Fruit:
         _require_tx_tuple(self.transactions)
         if len(self.transactions) < MIN_FRUIT_TX_COUNT:
             raise ValueError("fruit must contain the coinbase transaction")
-        if sum(len(tx) for tx in self.transactions) > MAX_FRUIT_PAYLOAD_BYTES:
+        if fruit_payload_size_bytes(self.transactions) > MAX_FRUIT_PAYLOAD_BYTES:
             raise ValueError("fruit payload exceeds MAX_FRUIT_PAYLOAD_BYTES")
         if self.tx_merkle_root() != self.header.tx_merkle_root:
             raise ValueError("fruit tx_merkle_root does not match transactions")
@@ -240,6 +241,13 @@ def tx_id(tx_bytes: bytes) -> bytes:
 
 def tx_merkle_root(transactions: tuple[bytes, ...]) -> bytes:
     return ordered_merkle_root(DOMAIN_TX_MERKLE_ROOT, tuple(tx_id(tx) for tx in transactions))
+
+
+def fruit_payload_size_bytes(transactions: tuple[bytes, ...]) -> int:
+    """Return serialized non-header fruit payload bytes for the transaction list."""
+
+    _require_tx_tuple(transactions)
+    return U16_BYTES + sum(U16_BYTES + len(tx) for tx in transactions)
 
 
 def fruit_set_root(fruit_hashes: tuple[bytes, ...]) -> bytes:

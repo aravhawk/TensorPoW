@@ -7,7 +7,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 import tensorpow.net.graphene as graphene
-from tensorpow.chain.blocks import Fruit, tx_merkle_root
+from tensorpow.chain.blocks import (
+    MAX_FRUIT_PAYLOAD_BYTES,
+    Fruit,
+    fruit_payload_size_bytes,
+    tx_merkle_root,
+)
 from tensorpow.chain.headers import FruitHeader
 from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
 from tensorpow.mempool import Mempool
@@ -87,6 +92,7 @@ def test_sketch_meets_95_percent_compression_for_99_percent_overlap_fixture() ->
     sketch = announce_fruit(fruit)
     compression_pct = (len(fruit.serialize()) - len(sketch)) * 100 // len(fruit.serialize())
 
+    assert fruit_payload_size_bytes(transactions) == MAX_FRUIT_PAYLOAD_BYTES
     assert len(receiver_has) * 100 // len(transactions) == GRAPHENE_RECEIVER_MEMPOOL_PCT
     assert compression_pct >= GRAPHENE_TARGET_COMPRESSION_PCT
 
@@ -149,7 +155,8 @@ def _mempool(txs: tuple[Transaction, ...]) -> Mempool:
 
 def _raw_fixture_tx(seed: int) -> bytes:
     prefix = seed.to_bytes(2, "little")
-    return prefix + bytes([seed]) * 78
+    payload_len = 68 if seed == 99 else 78
+    return prefix + bytes([seed]) * payload_len
 
 
 def _with_nonzero_bloom_tail(sketch: bytes) -> bytes:

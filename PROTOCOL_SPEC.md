@@ -255,13 +255,18 @@ Fruit body byte layout:
 | `header_len` | `uint16` | `U16_BYTES` | MUST equal encoded fruit header length. |
 | `header` | bytes | `header_len` | MUST decode as a valid fruit header. |
 | `tx_count` | `uint16` | `U16_BYTES` | MUST be at least `MIN_FRUIT_TX_COUNT`. |
-| `transactions` | repeated `len || tx` | variable | Each length is `uint16`; aggregate payload `<= MAX_FRUIT_PAYLOAD_BYTES`. |
+| `transactions` | repeated `tx_len || tx` | variable | Each `tx_len` is `uint16`; serialized non-header payload `<= MAX_FRUIT_PAYLOAD_BYTES`. |
 
 The first transaction MUST be a coinbase transaction for the fruit miner. All
 other transactions MUST be valid non-coinbase transactions assigned to the
 fruit's `shard_id`. `tx_merkle_root` is the Merkle root of transaction IDs in
 body order. Empty transaction bodies are invalid because the coinbase is
 mandatory.
+
+`MAX_FRUIT_PAYLOAD_BYTES` is evaluated over the serialized non-header fruit
+payload: `tx_count_u16_le || repeated(tx_len_u16_le || tx_bytes)`. It excludes
+only `header_len` and the fruit header bytes. Implementations that count only
+raw transaction bytes can accept fruits that byte-exact peers reject.
 
 ### Anchor Header
 
@@ -1121,7 +1126,7 @@ roots.
 | Constant | Value | Meaning |
 |---|---:|---|
 | `MAX_TX_BYTES` | `8192` | Maximum serialized transaction size. |
-| `MAX_FRUIT_PAYLOAD_BYTES` | `8192` | Maximum serialized non-header fruit payload. |
+| `MAX_FRUIT_PAYLOAD_BYTES` | `8192` | Maximum serialized non-header fruit payload, including `tx_count` and every transaction length prefix. |
 | `MIN_FRUIT_TX_COUNT` | `1` | Coinbase is mandatory. |
 | `OUTPOINT_BYTES` | `36` | Transaction hash plus output index. |
 | `TX_SEQUENCE_FINAL` | `0xffffffff` | Final sequence value. |
