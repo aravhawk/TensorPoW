@@ -103,7 +103,7 @@ def decompress_anchor_topology(data: bytes) -> tuple[bytes, ...]:
             raise TopologyCodecError("raw topology length mismatch")
         raw = compressed
     elif codec_id == CODEC_TOPOLOGY:
-        raw = _decode_affine_int8_body(compressed)
+        raw = _decode_affine_int8_body(compressed, uncompressed_len=uncompressed_len)
         if len(raw) != uncompressed_len:
             raise TopologyCodecError("uncompressed topology length mismatch")
     else:
@@ -140,7 +140,7 @@ def _factor_affine_int8(commitments: tuple[bytes, ...], raw: bytes) -> bytes | N
     )
 
 
-def _decode_affine_int8_body(body: bytes) -> bytes:
+def _decode_affine_int8_body(body: bytes, *, uncompressed_len: int) -> bytes:
     if len(body) != TOPOLOGY_FACTOR_BODY_BYTES:
         raise TopologyCodecError("topology factor body length is invalid")
 
@@ -153,6 +153,11 @@ def _decode_affine_int8_body(body: bytes) -> bytes:
     count = reader.u32()
     if count > MAX_TOPOLOGY_COMMITMENTS:
         raise TopologyCodecError("topology commitment count exceeds maximum")
+    if count < 2:
+        raise TopologyCodecError("topology affine factor requires at least two commitments")
+    expected_len = U32_BYTES + (count * HASH_LEN_BYTES)
+    if expected_len != uncompressed_len:
+        raise TopologyCodecError("uncompressed topology length mismatch")
     raw_hash = reader.bytes(HASH_LEN_BYTES)
     base = reader.bytes(HASH_LEN_BYTES)
     slope = reader.bytes(HASH_LEN_BYTES)

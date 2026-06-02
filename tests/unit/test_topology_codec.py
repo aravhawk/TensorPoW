@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import pytest
 
+import tensorpow.codec.topology as topology_module
 from tensorpow.codec.topology import (
     CODEC_RAW,
     CODEC_TOPOLOGY,
     COMPRESSED_OBJECT_HEADER_BYTES,
+    TOPOLOGY_AFFINE_INT8,
     TOPOLOGY_CODEC_COMPRESSION_PCT,
+    TOPOLOGY_CODEC_MAGIC,
     TopologyCodecError,
     compress_anchor_topology,
     decompress_anchor_topology,
@@ -91,6 +94,23 @@ def test_topology_codec_rejects_malformed_and_corrupt_inputs() -> None:
             decompress_anchor_topology(raw)
 
 
+def test_topology_affine_decoder_rejects_bad_shape_before_reconstructing_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_affine_row(_base: bytes, _slope: bytes, _row_index: int) -> bytes:
+        raise AssertionError("affine rows must not be reconstructed before shape checks")
+
+    monkeypatch.setattr(topology_module, "_affine_row", fail_affine_row)
+
+    mismatched_length = _topology_affine_object(count=10_000, uncompressed_len=4 + HASH_LEN_BYTES)
+    too_few_rows = _topology_affine_object(count=1, uncompressed_len=4 + HASH_LEN_BYTES)
+
+    with pytest.raises(TopologyCodecError, match="length mismatch"):
+        decompress_anchor_topology(mismatched_length)
+    with pytest.raises(TopologyCodecError, match="at least two"):
+        decompress_anchor_topology(too_few_rows)
+
+
 def test_topology_codec_rejects_noncanonical_raw_when_factorization_wins() -> None:
     commitments = _affine_commitments(32)
 
@@ -119,6 +139,27 @@ def _raw_object(commitments: tuple[bytes, ...]) -> bytes:
             len(raw).to_bytes(4, "little"),
             len(raw).to_bytes(4, "little"),
             raw,
+        )
+    )
+
+
+def _topology_affine_object(*, count: int, uncompressed_len: int) -> bytes:
+    body = b"".join(
+        (
+            TOPOLOGY_CODEC_MAGIC,
+            bytes((TOPOLOGY_AFFINE_INT8,)),
+            count.to_bytes(4, "little"),
+            bytes(HASH_LEN_BYTES),
+            bytes(HASH_LEN_BYTES),
+            bytes(HASH_LEN_BYTES),
+        )
+    )
+    return b"".join(
+        (
+            CODEC_TOPOLOGY.to_bytes(2, "little"),
+            uncompressed_len.to_bytes(4, "little"),
+            len(body).to_bytes(4, "little"),
+            body,
         )
     )
 
