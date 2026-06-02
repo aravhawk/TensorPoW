@@ -304,6 +304,27 @@ def test_empty_node_diff_is_less_than_twice_full_download_for_medium_fixture() -
     assert len(diff) <= (2 * full_download_size)
 
 
+def test_change_key_collision_falls_back_to_full_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_set = _set((1, 2))
+    target_set = _set((3, 4))
+
+    def colliding_change_key(_domain: bytes, _payload: bytes) -> bytes:
+        return bytes(sync.UTXO_IBLT_KEY_BYTES)
+
+    monkeypatch.setattr(sync, "_change_key", colliding_change_key)
+
+    diff = build_utxo_diff(local_set, target_set)
+    decoded = sync._decode_utxo_diff(diff)
+    reconciled = apply_utxo_diff(local_set, diff)
+
+    assert decoded.full_snapshot is True
+    assert decoded.removals == ()
+    assert decoded.additions == target_set.utxos()
+    assert reconciled.utxos() == target_set.utxos()
+
+
 def test_iblt_peel_rejects_non_self_clearing_pure_cell() -> None:
     cell_count = 5
     key = b"trapkey2"

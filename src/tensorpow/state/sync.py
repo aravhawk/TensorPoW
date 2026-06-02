@@ -66,6 +66,7 @@ class _DecodedUTXODiff:
     target_root: bytes
     removals: tuple[_RemoveRecord, ...]
     additions: tuple[UTXO, ...]
+    full_snapshot: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +83,11 @@ def build_utxo_diff(
     max_entries: int = MAX_UTXO_DIFF_ENTRIES,
     max_bytes: int = MAX_UTXO_DIFF_BYTES,
 ) -> bytes:
-    """Build a canonical bounded diff that transforms `local_set` into `target_set`."""
+    """Build a canonical bounded diff that transforms `local_set` into `target_set`.
+
+    Compact diffs use IBLT change keys. If those 8-byte keys collide, the
+    encoder falls back to a full target-set snapshot inside the same envelope.
+    """
 
     _require_utxo_set("local_set", local_set)
     _require_utxo_set("target_set", target_set)
@@ -109,16 +114,23 @@ def build_utxo_diff(
         if outpoint not in local_by_outpoint:
             additions.append(target_utxo)
 
-    return _encode_utxo_diff(
-        _DecodedUTXODiff(
-            base_root=local_set.merkle_root(),
-            target_root=target_set.merkle_root(),
-            removals=tuple(removals),
-            additions=tuple(additions),
-        ),
-        max_entries=max_entries,
-        max_bytes=max_bytes,
+    decoded = _DecodedUTXODiff(
+        base_root=local_set.merkle_root(),
+        target_root=target_set.merkle_root(),
+        removals=tuple(removals),
+        additions=tuple(additions),
     )
+    try:
+        return _encode_utxo_diff(decoded, max_entries=max_entries, max_bytes=max_bytes)
+    except UTXOReconciliationError as error:
+        if "duplicate IBLT change keys" not in str(error):
+            raise
+        return _encode_full_snapshot_diff(
+            base_root=local_set.merkle_root(),
+            target_set=target_set,
+            max_entries=max_entries,
+            max_bytes=max_bytes,
+        )
 
 
 def request_utxo_diff(local_root: bytes, peer: UTXODiffPeer) -> bytes:
@@ -152,7 +164,10 @@ def apply_utxo_diff(
     if local_set.merkle_root() != decoded.base_root:
         raise UTXOReconciliationError("diff base root does not match local UTXO root")
 
-    reconciled = UTXOSet(_utxos_by_outpoint(local_set).values())
+    if decoded.full_snapshot:
+        reconciled = UTXOSet()
+    else:
+        reconciled = UTXOSet(_utxos_by_outpoint(local_set).values())
     for removal in decoded.removals:
         existing = reconciled.get(removal.outpoint)
         if existing is None:
@@ -215,6 +230,44 @@ def _encode_utxo_diff(
     return diff
 
 
+def _encode_full_snapshot_diff(
+    *,
+    base_root: bytes,
+    target_set: UTXOSet,
+    max_entries: int,
+    max_bytes: int,
+) -> bytes:
+    """Encode the complete target set for rare IBLT change-key collisions."""
+
+    additions = target_set.utxos()
+    _require_canonical_records((), additions, max_entries=max_entries)
+
+    body = bytearray()
+    for utxo in additions:
+        utxo_bytes = utxo.to_bytes()
+        if len(utxo_bytes) > MAX_UTXO_DIFF_ADD_BYTES:
+            raise UTXOReconciliationError("added UTXO exceeds maximum encoded size")
+        body += len(utxo_bytes).to_bytes(U16_BYTES, "little")
+        body += utxo_bytes
+
+    payload = b"".join(
+        (
+            UTXO_DIFF_MAGIC,
+            base_root,
+            target_set.merkle_root(),
+            (0).to_bytes(U32_BYTES, "little"),
+            len(additions).to_bytes(U32_BYTES, "little"),
+            (0).to_bytes(U16_BYTES, "little"),
+            bytes((0,)),
+            bytes(body),
+        )
+    )
+    diff = payload + _diff_checksum(payload)
+    if len(diff) > max_bytes:
+        raise UTXOReconciliationError("UTXO diff exceeds maximum encoded size")
+    return diff
+
+
 def _decode_utxo_diff(
     diff: bytes,
     *,
@@ -252,18 +305,24 @@ def _decode_utxo_diff(
 
     if remove_count + add_count > max_entries:
         raise UTXOReconciliationError("UTXO diff entry count exceeds maximum")
-    if iblt_hash_count != UTXO_IBLT_HASH_COUNT:
+    full_snapshot = iblt_cell_count == 0 and iblt_hash_count == 0
+    if full_snapshot and remove_count != 0:
+        raise UTXOReconciliationError("full UTXO snapshot cannot include removals")
+    if not full_snapshot and iblt_hash_count != UTXO_IBLT_HASH_COUNT:
         raise UTXOReconciliationError("UTXO diff IBLT hash count is non-canonical")
-    if iblt_cell_count != _canonical_iblt_cell_count(remove_count + add_count):
+    if not full_snapshot and iblt_cell_count != _canonical_iblt_cell_count(
+        remove_count + add_count
+    ):
         raise UTXOReconciliationError("UTXO diff IBLT cell count is non-canonical")
 
     iblt_cells: list[_IBLTCell] = []
-    for _ in range(iblt_cell_count):
-        end = offset + UTXO_IBLT_CELL_BYTES
-        if end > len(payload):
-            raise UTXOReconciliationError("UTXO diff is truncated in IBLT cells")
-        iblt_cells.append(_decode_iblt_cell(payload[offset:end]))
-        offset = end
+    if not full_snapshot:
+        for _ in range(iblt_cell_count):
+            end = offset + UTXO_IBLT_CELL_BYTES
+            if end > len(payload):
+                raise UTXOReconciliationError("UTXO diff is truncated in IBLT cells")
+            iblt_cells.append(_decode_iblt_cell(payload[offset:end]))
+            offset = end
 
     removals: list[_RemoveRecord] = []
     for _ in range(remove_count):
@@ -301,9 +360,11 @@ def _decode_utxo_diff(
         target_root=target_root,
         removals=tuple(removals),
         additions=tuple(additions),
+        full_snapshot=full_snapshot,
     )
     _require_canonical_records(decoded.removals, decoded.additions, max_entries=max_entries)
-    _validate_iblt_sketch(tuple(iblt_cells), decoded)
+    if not decoded.full_snapshot:
+        _validate_iblt_sketch(tuple(iblt_cells), decoded)
     return decoded
 
 
