@@ -253,9 +253,13 @@ class InMemoryRpcBackend:
         mempool: Mempool | None = None,
         shard_tree: ShardTree | None = None,
         utxo_set: UTXOSet | None = None,
+        current_time_ms: int = 0,
+        current_height: int = 0,
     ) -> None:
         self.shard_tree = ShardTree() if shard_tree is None else shard_tree
         self.utxo_set = UTXOSet() if utxo_set is None else utxo_set
+        self.current_time_ms = _require_nonnegative_int("current_time_ms", current_time_ms)
+        self.current_height = _require_nonnegative_int("current_height", current_height)
         self.mempool = (
             Mempool(shard_tree=self.shard_tree, utxo_view=self.utxo_set)
             if mempool is None
@@ -315,7 +319,12 @@ class InMemoryRpcBackend:
         )
 
     def getbalance(self, owner_pubkey_hash: bytes, address: str) -> JsonObject:
-        utxos = _utxos_for_owner(self.utxo_set, owner_pubkey_hash)
+        utxos = _spendable_utxos_for_owner(
+            self.utxo_set,
+            owner_pubkey_hash,
+            current_time_ms=self.current_time_ms,
+            current_height=self.current_height,
+        )
         return {
             "address": address,
             "balance_matoms": sum(utxo.amount_matoms for utxo in utxos),
@@ -330,7 +339,12 @@ class InMemoryRpcBackend:
         offset: int = 0,
         limit: int = DEFAULT_GETUTXOS_LIMIT,
     ) -> JsonObject:
-        utxos = _utxos_for_owner(self.utxo_set, owner_pubkey_hash)
+        utxos = _spendable_utxos_for_owner(
+            self.utxo_set,
+            owner_pubkey_hash,
+            current_time_ms=self.current_time_ms,
+            current_height=self.current_height,
+        )
         page = utxos[offset : offset + limit]
         return {
             "address": address,
@@ -402,7 +416,13 @@ class NodeRpcAdapter:
         )
 
     def getbalance(self, owner_pubkey_hash: bytes, address: str) -> JsonObject:
-        utxos = _utxos_for_owner(_node_utxo_set(self._node), owner_pubkey_hash)
+        current_time_ms, current_height = _node_spendability_context(self._node)
+        utxos = _spendable_utxos_for_owner(
+            _node_utxo_set(self._node),
+            owner_pubkey_hash,
+            current_time_ms=current_time_ms,
+            current_height=current_height,
+        )
         return {
             "address": address,
             "balance_matoms": sum(utxo.amount_matoms for utxo in utxos),
@@ -417,7 +437,13 @@ class NodeRpcAdapter:
         offset: int = 0,
         limit: int = DEFAULT_GETUTXOS_LIMIT,
     ) -> JsonObject:
-        utxos = _utxos_for_owner(_node_utxo_set(self._node), owner_pubkey_hash)
+        current_time_ms, current_height = _node_spendability_context(self._node)
+        utxos = _spendable_utxos_for_owner(
+            _node_utxo_set(self._node),
+            owner_pubkey_hash,
+            current_time_ms=current_time_ms,
+            current_height=current_height,
+        )
         page = utxos[offset : offset + limit]
         return {
             "address": address,
@@ -1325,6 +1351,32 @@ def _utxos_for_owner(utxo_set: UTXOSet, owner_pubkey_hash: bytes) -> tuple[UTXO,
     return utxo_set.by_owner(owner_pubkey_hash)
 
 
+def _spendable_utxos_for_owner(
+    utxo_set: UTXOSet,
+    owner_pubkey_hash: bytes,
+    *,
+    current_time_ms: int,
+    current_height: int,
+) -> tuple[UTXO, ...]:
+    current_time_ms = _require_nonnegative_int("current_time_ms", current_time_ms)
+    current_height = _require_nonnegative_int("current_height", current_height)
+    return tuple(
+        utxo
+        for utxo in _utxos_for_owner(utxo_set, owner_pubkey_hash)
+        if _utxo_is_spendable(
+            utxo,
+            current_time_ms=current_time_ms,
+            current_height=current_height,
+        )
+    )
+
+
+def _utxo_is_spendable(utxo: UTXO, *, current_time_ms: int, current_height: int) -> bool:
+    return (utxo.locktime_ms == 0 or current_time_ms >= utxo.locktime_ms) and (
+        utxo.lockheight == 0 or current_height >= utxo.lockheight
+    )
+
+
 def _mempool_entries(mempool: Mempool, shard_id: int | None) -> tuple[MempoolEntry, ...]:
     entries = mempool.entries()
     if shard_id is None:
@@ -1351,6 +1403,18 @@ def _node_utxo_set(node: object) -> UTXOSet:
     if not isinstance(utxo_set, UTXOSet):
         raise JsonRpcError(INTERNAL_ERROR, "Internal error", "backend has no utxo_set")
     return utxo_set
+
+
+def _node_spendability_context(node: object) -> tuple[int, int]:
+    current_time_ms = _optional_nonnegative_int(
+        _call_optional(node, ("current_time_ms", "current_timestamp_ms"))
+    )
+    current_height = _optional_nonnegative_int(
+        _call_optional(node, ("current_height", "anchor_height", "_anchor_height"))
+    )
+    return 0 if current_time_ms is None else current_time_ms, (
+        0 if current_height is None else current_height
+    )
 
 
 def _node_shard_tree(node: object) -> ShardTree:
@@ -1606,6 +1670,13 @@ def _optional_hash(value: object) -> bytes | None:
 
 def _optional_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _optional_nonnegative_int(value: object) -> int | None:
+    parsed = _optional_int(value)
+    if parsed is None or parsed < 0:
+        return None
+    return parsed
 
 
 def _optional_str(value: object) -> str | None:

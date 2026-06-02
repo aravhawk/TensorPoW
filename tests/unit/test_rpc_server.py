@@ -290,6 +290,46 @@ def test_getutxos_uses_owner_index_and_paginates(monkeypatch: pytest.MonkeyPatch
     assert page["utxos"] == [_utxo_json(second)]
 
 
+def test_getbalance_and_getutxos_only_report_spendable_outputs() -> None:
+    unlocked = _utxo(1, amount=100)
+    time_locked = _utxo(2, amount=200, locktime_ms=50)
+    height_locked = _utxo(3, amount=300, lockheight=7)
+    utxo_set = UTXOSet((height_locked, unlocked, time_locked))
+    immature_server = JsonRpcServer(
+        InMemoryRpcBackend(
+            utxo_set=utxo_set,
+            current_time_ms=49,
+            current_height=6,
+        )
+    )
+
+    immature_balance = _rpc(immature_server, "getbalance", {"address": ADDRESS1})
+    immature_utxos = _rpc(immature_server, "getutxos", {"address": ADDRESS1})
+
+    assert immature_balance == {"address": ADDRESS1, "balance_matoms": 100, "utxo_count": 1}
+    assert immature_utxos["total"] == 1
+    assert immature_utxos["utxos"] == [_utxo_json(unlocked)]
+
+    mature_server = JsonRpcServer(
+        InMemoryRpcBackend(
+            utxo_set=utxo_set,
+            current_time_ms=50,
+            current_height=7,
+        )
+    )
+
+    mature_balance = _rpc(mature_server, "getbalance", {"address": ADDRESS1})
+    mature_utxos = _rpc(mature_server, "getutxos", {"address": ADDRESS1})
+
+    assert mature_balance == {"address": ADDRESS1, "balance_matoms": 600, "utxo_count": 3}
+    assert mature_utxos["total"] == 3
+    assert mature_utxos["utxos"] == [
+        _utxo_json(unlocked),
+        _utxo_json(time_locked),
+        _utxo_json(height_locked),
+    ]
+
+
 def test_getutxos_rejects_unbounded_limits() -> None:
     server = JsonRpcServer(InMemoryRpcBackend())
 
@@ -386,12 +426,21 @@ def _outpoint(seed: int) -> Outpoint:
     return Outpoint(bytes([seed]) * 32, 0)
 
 
-def _utxo(seed: int, *, amount: int, owner: bytes = PKH1) -> UTXO:
+def _utxo(
+    seed: int,
+    *,
+    amount: int,
+    owner: bytes = PKH1,
+    locktime_ms: int = 0,
+    lockheight: int = 0,
+) -> UTXO:
     return UTXO(
         outpoint=_outpoint(seed),
         amount_matoms=amount,
         template_id=TEMPLATE_PKH,
         owner_pubkey_hash=owner,
+        locktime_ms=locktime_ms,
+        lockheight=lockheight,
     )
 
 
