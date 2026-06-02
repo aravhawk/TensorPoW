@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import signal
@@ -10,8 +11,8 @@ import subprocess
 import sys
 import time
 import tomllib
-from collections.abc import Callable, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -20,6 +21,7 @@ from typing import Final, cast
 DEFAULT_NODE_DIR: Final[Path] = Path.home() / ".tensorpow" / "node"
 CONFIG_FILENAME: Final[str] = "tensorpow.toml"
 PID_FILENAME: Final[str] = "tensorpow.pid"
+PID_LOCK_FILENAME: Final[str] = f"{PID_FILENAME}.lock"
 STATUS_FILENAME: Final[str] = "status.json"
 PEERS_FILENAME: Final[str] = "peers.json"
 LOG_FILENAME: Final[str] = "node.log"
@@ -111,11 +113,10 @@ def _cmd_init(args: argparse.Namespace) -> int:
 def _cmd_start(args: argparse.Namespace) -> int:
     data_dir = Path(args.data_dir)
     config = _load_config(data_dir)
-    existing_pid = _read_pid(data_dir)
-    if existing_pid is not None and _pid_is_running(existing_pid):
+    existing_pid = _running_pid_or_clear_stale(data_dir)
+    if existing_pid is not None:
         _print_json({"data_dir": str(data_dir), "pid": existing_pid, "running": True})
         return 0
-    _remove_pid(data_dir)
 
     log_path = data_dir / LOG_FILENAME
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -138,9 +139,35 @@ def _cmd_start(args: argparse.Namespace) -> int:
     deadline = time.monotonic() + START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if process.poll() is not None:
+            running_pid = _running_pid_or_clear_stale(data_dir)
+            if running_pid is not None:
+                _print_json(
+                    {
+                        "data_dir": str(data_dir),
+                        "listen": config.listen,
+                        "network": config.network,
+                        "pid": running_pid,
+                        "running": True,
+                    }
+                )
+                return 0
             raise NodeCliError("node process exited during startup")
         pid = _read_pid(data_dir)
         if pid == process.pid and _pid_is_running(pid):
+            _print_json(
+                {
+                    "data_dir": str(data_dir),
+                    "listen": config.listen,
+                    "network": config.network,
+                    "pid": pid,
+                    "running": True,
+                }
+            )
+            return 0
+        if pid is not None and pid != process.pid and _pid_is_running(pid):
+            process.terminate()
+            with suppress(NodeCliError):
+                _wait_until_stopped(process.pid)
             _print_json(
                 {
                     "data_dir": str(data_dir),
@@ -164,7 +191,10 @@ def _cmd_stop(args: argparse.Namespace) -> int:
     if was_running and pid is not None:
         os.kill(pid, signal.SIGTERM)
         _wait_until_stopped(pid)
-    _remove_pid(data_dir)
+    if pid is not None:
+        _remove_pid_if_matches(data_dir, pid)
+    else:
+        _remove_pid(data_dir)
     _write_stopped_status(data_dir)
     _print_json({"data_dir": str(data_dir), "running": False, "was_running": was_running})
     return 0
@@ -189,11 +219,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     data_dir = Path(args.data_dir)
     config = _load_config(data_dir)
     pid = os.getpid()
-    existing_pid = _read_pid(data_dir)
-    if existing_pid is not None and existing_pid != pid and _pid_is_running(existing_pid):
-        raise NodeCliError("node is already running")
 
     stop_event = Event()
+    pid_acquired = False
 
     def _handle_signal(_signum: int, _frame: object) -> None:
         stop_event.set()
@@ -201,6 +229,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
     _write_pid(data_dir, pid)
+    pid_acquired = True
     _write_status(
         data_dir,
         {
@@ -216,8 +245,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         while not stop_event.wait(0.2):
             pass
     finally:
-        _remove_pid(data_dir)
-        _write_stopped_status(data_dir)
+        if pid_acquired:
+            _remove_pid_if_matches(data_dir, pid)
+            _write_stopped_status(data_dir)
     return 0
 
 
@@ -259,12 +289,10 @@ def _load_config(data_dir: Path) -> _NodeConfig:
 
 def _status_payload(data_dir: Path) -> dict[str, object]:
     config = _load_config(data_dir)
-    pid = _read_pid(data_dir)
-    running = pid is not None and _pid_is_running(pid)
-    if pid is not None and not running:
-        _remove_pid(data_dir)
+    pid = _running_pid_or_clear_stale(data_dir)
+    running = pid is not None
+    if not running:
         _write_stopped_status(data_dir)
-        pid = None
     status = _read_status(data_dir)
     return {
         "data_dir": str(data_dir),
@@ -339,6 +367,32 @@ def _pid_path(data_dir: Path) -> Path:
     return data_dir / PID_FILENAME
 
 
+def _pid_lock_path(data_dir: Path) -> Path:
+    return data_dir / PID_LOCK_FILENAME
+
+
+@contextmanager
+def _pid_file_lock(data_dir: Path) -> Iterator[None]:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    with _pid_lock_path(data_dir).open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _running_pid_or_clear_stale(data_dir: Path) -> int | None:
+    with _pid_file_lock(data_dir):
+        pid = _read_pid(data_dir)
+        if pid is None:
+            return None
+        if _pid_is_running(pid):
+            return pid
+        _remove_pid(data_dir)
+        return None
+
+
 def _read_pid(data_dir: Path) -> int | None:
     path = _pid_path(data_dir)
     if not path.exists():
@@ -355,12 +409,34 @@ def _read_pid(data_dir: Path) -> int | None:
 def _write_pid(data_dir: Path, pid: int) -> None:
     if pid <= 0:
         raise NodeCliError("node pid must be positive")
-    _pid_path(data_dir).write_text(f"{pid}\n", encoding="utf-8")
+    with _pid_file_lock(data_dir):
+        existing_pid = _read_pid(data_dir)
+        if existing_pid is not None:
+            if _pid_is_running(existing_pid):
+                raise NodeCliError("node is already running")
+            _remove_pid(data_dir)
+        path = _pid_path(data_dir)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        try:
+            os.write(fd, f"{pid}\n".encode("ascii"))
+        except OSError:
+            with suppress(FileNotFoundError):
+                path.unlink()
+            raise
+        finally:
+            os.close(fd)
 
 
 def _remove_pid(data_dir: Path) -> None:
     with suppress(FileNotFoundError):
         _pid_path(data_dir).unlink()
+
+
+def _remove_pid_if_matches(data_dir: Path, pid: int) -> None:
+    with _pid_file_lock(data_dir):
+        current_pid = _read_pid(data_dir)
+        if current_pid == pid:
+            _remove_pid(data_dir)
 
 
 def _pid_is_running(pid: int) -> bool:

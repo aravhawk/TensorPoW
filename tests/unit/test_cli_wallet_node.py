@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+import tensorpow.cli.node as node_cli
 from tensorpow.cli.mine import main as mine_main
 from tensorpow.cli.node import main as node_main
 from tensorpow.cli.wallet import DEFAULT_SEND_FEE_MATOMS
@@ -131,6 +134,24 @@ def test_node_cli_init_start_status_peers_stop(tmp_path: Path, capsys: object) -
     assert _read_stdout(capsys)["peer_count"] == 0
     assert node_main(["stop", "--data-dir", str(data_dir)]) == 0
     assert not _read_stdout(capsys)["running"]
+
+
+def test_node_pid_file_acquisition_refuses_active_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    active_pid = 101
+    competing_pid = 202
+    monkeypatch.setattr(node_cli, "_pid_is_running", lambda pid: pid == active_pid)
+
+    node_cli._write_pid(data_dir, active_pid)
+    with pytest.raises(node_cli.NodeCliError, match="node is already running"):
+        node_cli._write_pid(data_dir, competing_pid)
+
+    assert node_cli._read_pid(data_dir) == active_pid
+    node_cli._remove_pid_if_matches(data_dir, competing_pid)
+    assert node_cli._read_pid(data_dir) == active_pid
 
 
 def test_mine_cli_finds_nonce_and_rejects_bad_targets(capsys: object) -> None:
