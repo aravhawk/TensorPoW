@@ -60,6 +60,34 @@ def test_wallet_balance_and_insufficient_funds() -> None:
         wallet.build_transaction(utxos, other.address, amount_matoms=8, fee_matoms=1)
 
 
+def test_wallet_filters_locked_and_immature_utxos() -> None:
+    wallet = Wallet.recover("11" * 32)
+    recipient = Wallet.recover("22" * 32)
+    unlocked = _owned_utxo(wallet, 7, 0)
+    time_locked = _owned_utxo(wallet, 11, 1, locktime_ms=100)
+    height_locked = _owned_utxo(wallet, 13, 2, lockheight=10)
+    utxos = (time_locked, height_locked, unlocked)
+
+    assert wallet.owned_utxos(utxos) == (unlocked,)
+    assert wallet.balance(utxos) == 7
+    assert wallet.balance(utxos, current_time_ms=100, current_height=10) == 31
+    with pytest.raises(WalletError, match="insufficient"):
+        wallet.build_transaction(utxos, recipient.address, amount_matoms=8, fee_matoms=0)
+
+    tx = wallet.build_transaction(
+        utxos,
+        recipient.address,
+        amount_matoms=8,
+        fee_matoms=0,
+        current_time_ms=100,
+        current_height=10,
+    )
+    assert {input_.previous_outpoint for input_ in tx.inputs} == {
+        unlocked.outpoint,
+        time_locked.outpoint,
+    }
+
+
 def test_wallet_wraps_invalid_transaction_construction_errors() -> None:
     wallet = Wallet.recover("11" * 32)
     recipient = Wallet.recover("22" * 32)
@@ -106,12 +134,21 @@ def test_utxo_json_helpers(tmp_path: Path) -> None:
     ]
 
 
-def _owned_utxo(wallet: Wallet, amount: int, index: int) -> UTXO:
+def _owned_utxo(
+    wallet: Wallet,
+    amount: int,
+    index: int,
+    *,
+    locktime_ms: int = 0,
+    lockheight: int = 0,
+) -> UTXO:
     outpoint = Outpoint(bytes([index + 1]) * 32, index)
     return UTXO(
         outpoint=outpoint,
         amount_matoms=amount,
         template_id=TEMPLATE_PKH,
         owner_pubkey_hash=wallet.pubkey_hash(),
+        locktime_ms=locktime_ms,
+        lockheight=lockheight,
         payload=wallet.pubkey_hash(),
     )

@@ -140,27 +140,63 @@ class Wallet:
 
         return WalletMetadata(public_key=self.public_key, address=self.address)
 
-    def owned_utxos(self, utxos: Iterable[UTXO]) -> tuple[UTXO, ...]:
+    def owned_utxos(
+        self,
+        utxos: Iterable[UTXO],
+        *,
+        current_time_ms: int = 0,
+        current_height: int = 0,
+    ) -> tuple[UTXO, ...]:
         """Return standard PKH UTXOs spendable by this wallet in canonical order."""
 
+        _require_u64("current_time_ms", current_time_ms)
+        _require_u64("current_height", current_height)
         owned = []
         for utxo in _require_utxos(utxos):
             if (
                 utxo.template_id == TEMPLATE_PKH
                 and utxo.owner_pubkey_hash == self.owner_pubkey_hash
+                and _utxo_is_mature(
+                    utxo,
+                    current_time_ms=current_time_ms,
+                    current_height=current_height,
+                )
             ):
                 owned.append(utxo)
         return tuple(sorted(owned, key=lambda utxo: utxo.outpoint.to_bytes()))
 
-    def balance_matoms(self, utxos: Iterable[UTXO]) -> int:
+    def balance_matoms(
+        self,
+        utxos: Iterable[UTXO],
+        *,
+        current_time_ms: int = 0,
+        current_height: int = 0,
+    ) -> int:
         """Return the wallet's confirmed standard-PKH balance in matoms."""
 
-        return sum(utxo.amount_matoms for utxo in self.owned_utxos(utxos))
+        return sum(
+            utxo.amount_matoms
+            for utxo in self.owned_utxos(
+                utxos,
+                current_time_ms=current_time_ms,
+                current_height=current_height,
+            )
+        )
 
-    def balance(self, utxos: Iterable[UTXO]) -> int:
+    def balance(
+        self,
+        utxos: Iterable[UTXO],
+        *,
+        current_time_ms: int = 0,
+        current_height: int = 0,
+    ) -> int:
         """Return the wallet's confirmed standard-PKH balance in matoms."""
 
-        return self.balance_matoms(utxos)
+        return self.balance_matoms(
+            utxos,
+            current_time_ms=current_time_ms,
+            current_height=current_height,
+        )
 
     def save(self, path: str | Path, password: str | bytes, *, overwrite: bool = False) -> Path:
         """Save this wallet to an encrypted keystore and return the path."""
@@ -178,6 +214,8 @@ class Wallet:
         change_address: str | None = None,
         locktime_ms: int = 0,
         lockheight: int = 0,
+        current_time_ms: int = 0,
+        current_height: int = 0,
     ) -> Transaction:
         """Build and sign a standard PKH transaction with deterministic coin selection."""
 
@@ -185,6 +223,8 @@ class Wallet:
         _require_u64("fee_matoms", fee_matoms)
         _require_u64("locktime_ms", locktime_ms)
         _require_u64("lockheight", lockheight)
+        _require_u64("current_time_ms", current_time_ms)
+        _require_u64("current_height", current_height)
         if amount_matoms > MAX_SUPPLY_MATOMS:
             raise WalletError("amount_matoms exceeds MAX_SUPPLY_MATOMS")
         recipient_hash = _address_hash("recipient_address", recipient_address)
@@ -195,7 +235,11 @@ class Wallet:
 
         selected: list[UTXO] = []
         selected_amount = 0
-        for utxo in self.owned_utxos(utxos):
+        for utxo in self.owned_utxos(
+            utxos,
+            current_time_ms=current_time_ms,
+            current_height=current_height,
+        ):
             selected.append(utxo)
             selected_amount += utxo.amount_matoms
             if selected_amount >= required:
@@ -269,6 +313,8 @@ class Wallet:
         *,
         amount_matoms: int,
         fee_matoms: int,
+        current_time_ms: int = 0,
+        current_height: int = 0,
     ) -> Transaction:
         """Compatibility wrapper for standard signed transaction construction."""
 
@@ -277,6 +323,8 @@ class Wallet:
             recipient_address=recipient_address,
             amount_matoms=amount_matoms,
             fee_matoms=fee_matoms,
+            current_time_ms=current_time_ms,
+            current_height=current_height,
         )
 
 
@@ -606,6 +654,12 @@ def _require_utxos(utxos: object) -> tuple[UTXO, ...]:
         if not isinstance(utxo, UTXO):
             raise TypeError("utxos must contain UTXO values")
     return result
+
+
+def _utxo_is_mature(utxo: UTXO, *, current_time_ms: int, current_height: int) -> bool:
+    return (utxo.locktime_ms == 0 or current_time_ms >= utxo.locktime_ms) and (
+        utxo.lockheight == 0 or current_height >= utxo.lockheight
+    )
 
 
 def _require_exact_bytes(name: str, value: bytes, expected_len: int) -> None:

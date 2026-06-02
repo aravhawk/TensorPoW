@@ -400,6 +400,7 @@ def test_coinbase_matures_at_covering_anchor_height(
         recipient_address=recipient.address,
         amount_matoms=9_000,
         fee_matoms=1_000,
+        current_height=coinbase_utxo.lockheight,
     )
     early_fruit = _fruit(
         (_coinbase_tx(101).to_bytes(), spend.to_bytes()),
