@@ -42,6 +42,9 @@ DAS_RS_PRIMITIVE_POLY: Final[int] = 0x11D
 DAS_RS_GENERATOR: Final[int] = 2
 DAS_RS_FIRST_CONSECUTIVE_ROOT: Final[int] = 0
 DAS_RS_FIELD_EXPONENT: Final[int] = 8
+DAS_RS_MAX_CODEWORD_SYMBOLS: Final[int] = (1 << DAS_RS_FIELD_EXPONENT) - 1
+DAS_MAX_DATA_SIDE: Final[int] = DAS_RS_MAX_CODEWORD_SYMBOLS // DAS_RS_EXTENSION_FACTOR
+DAS_MAX_PAYLOAD_BYTES: Final[int] = DAS_MAX_DATA_SIDE * DAS_MAX_DATA_SIDE * DAS_CELL_BYTES
 DAS_SAMPLE_SUCCESS_THRESHOLD_PCT: Final[int] = 75
 DAS_SAMPLES_PER_FRUIT: Final[int] = 10
 DAS_CONFIDENCE_PCT: Final[int] = 99
@@ -220,8 +223,8 @@ def encode_payload(payload: bytes) -> DASEncoding:
 
     data_cell_count = max(1, _ceil_div(payload_length, DAS_CELL_BYTES))
     data_side = _ceil_sqrt(data_cell_count)
-    if data_side >= U32_MAX:
-        raise ValueError("payload is too large for DAS side encoding")
+    if data_side > DAS_MAX_DATA_SIDE:
+        raise ValueError("payload exceeds DAS_MAX_PAYLOAD_BYTES")
 
     padded_data_cell_count = data_side * data_side
     data_cells = tuple(
@@ -811,7 +814,7 @@ def _rs_check_symbols(symbols: Sequence[int], data_side: int) -> bool:
 @cache
 def _rs_codec(data_side: int) -> RSCodec:
     _require_positive_u32("data_side", data_side)
-    if data_side * DAS_RS_EXTENSION_FACTOR > 255:
+    if data_side > DAS_MAX_DATA_SIDE:
         raise ValueError("DAS Reed-Solomon side exceeds GF(2^8) codeword limit")
     return RSCodec(
         data_side,
@@ -976,10 +979,13 @@ class _Reader:
 __all__ = [
     "DAS_CELL_BYTES",
     "DAS_CONFIDENCE_PCT",
+    "DAS_MAX_DATA_SIDE",
+    "DAS_MAX_PAYLOAD_BYTES",
     "DAS_RS_EXTENSION_FACTOR",
     "DAS_RS_FIELD_EXPONENT",
     "DAS_RS_FIRST_CONSECUTIVE_ROOT",
     "DAS_RS_GENERATOR",
+    "DAS_RS_MAX_CODEWORD_SYMBOLS",
     "DAS_RS_PRIMITIVE_POLY",
     "DAS_SAMPLES_PER_FRUIT",
     "DAS_SAMPLE_REQUEST_BYTES",

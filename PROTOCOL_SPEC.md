@@ -851,6 +851,8 @@ Rules:
   `DAS_RS_FIRST_CONSECUTIVE_ROOT`, and field exponent
   `DAS_RS_FIELD_EXPONENT`. Encoders extend every data row from `k` to `2k`
   symbols, then extend every resulting column from `k` to `2k` symbols.
+- The maximum data matrix side is `DAS_MAX_DATA_SIDE`; payloads larger than
+  `DAS_MAX_PAYLOAD_BYTES` are invalid for DAS encoding.
 - A light verifier samples `DAS_SAMPLES_PER_FRUIT` uniformly using
   `BLAKE3(DOMAIN_DAS_SAMPLE || fruit_hash || sample_index_le)` as randomness.
 - A fruit is considered available to a light verifier when at least
@@ -1195,6 +1197,9 @@ roots.
 | `DAS_RS_GENERATOR` | `2` | Reed-Solomon GF(2^8) generator. |
 | `DAS_RS_FIRST_CONSECUTIVE_ROOT` | `0` | Reed-Solomon first consecutive root. |
 | `DAS_RS_FIELD_EXPONENT` | `8` | Reed-Solomon GF field exponent. |
+| `DAS_RS_MAX_CODEWORD_SYMBOLS` | `255` | Maximum RS codeword symbols in GF(2^8). |
+| `DAS_MAX_DATA_SIDE` | `127` | Maximum DAS data matrix side. |
+| `DAS_MAX_PAYLOAD_BYTES` | `4129024` | Maximum DAS payload bytes. |
 | `DAS_SAMPLE_SUCCESS_THRESHOLD_PCT` | `75` | Availability success threshold. |
 | `DAS_SAMPLES_PER_FRUIT` | `10` | Samples per fruit for light verifier. |
 | `DAS_CONFIDENCE_PCT` | `99` | Claimed light-verifier confidence. |

@@ -10,6 +10,8 @@ import tensorpow.net.das as das_module
 from tensorpow.crypto.hash import hash_bytes
 from tensorpow.net.das import (
     DAS_CELL_BYTES,
+    DAS_MAX_DATA_SIDE,
+    DAS_MAX_PAYLOAD_BYTES,
     DAS_RS_EXTENSION_FACTOR,
     DAS_RS_FIELD_EXPONENT,
     DAS_RS_FIRST_CONSECUTIVE_ROOT,
@@ -104,6 +106,14 @@ def test_das_reed_solomon_codec_pins_field_parameters(
         "generator": DAS_RS_GENERATOR,
         "c_exp": DAS_RS_FIELD_EXPONENT,
     }
+
+
+def test_encode_payload_rejects_actual_das_side_limit() -> None:
+    assert DAS_MAX_DATA_SIDE == 127
+    assert DAS_MAX_PAYLOAD_BYTES == 4_129_024
+
+    with pytest.raises(ValueError, match="DAS_MAX_PAYLOAD_BYTES"):
+        encode_payload(b"x" * (DAS_MAX_PAYLOAD_BYTES + 1))
 
 
 def test_sample_selection_and_proof_verification_are_deterministic() -> None:
