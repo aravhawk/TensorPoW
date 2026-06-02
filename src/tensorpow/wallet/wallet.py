@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from tensorpow.crypto.address import address_to_pubkey_hash, pubkey_to_address, validate_address
 from tensorpow.crypto.signatures import ED25519_PRIVATE_KEY_BYTES, SIG_TYPE_ED25519, Keypair, sign
-from tensorpow.state.utxo import TEMPLATE_PKH, UTXO, Outpoint
+from tensorpow.state.utxo import MAX_SUPPLY_MATOMS, TEMPLATE_PKH, UTXO, Outpoint
 from tensorpow.tx.script import pubkey_hash, verify_template
 from tensorpow.tx.transaction import FORMAT_EPOCH, Input, Output, Transaction
 
@@ -185,6 +185,8 @@ class Wallet:
         _require_u64("fee_matoms", fee_matoms)
         _require_u64("locktime_ms", locktime_ms)
         _require_u64("lockheight", lockheight)
+        if amount_matoms > MAX_SUPPLY_MATOMS:
+            raise WalletError("amount_matoms exceeds MAX_SUPPLY_MATOMS")
         recipient_hash = _address_hash("recipient_address", recipient_address)
         change_hash = _address_hash("change_address", change_address or self.address)
         required = amount_matoms + fee_matoms
@@ -201,20 +203,25 @@ class Wallet:
         if selected_amount < required:
             raise WalletError("insufficient spendable balance")
 
-        outputs: list[Output] = [Output(amount_matoms, TEMPLATE_PKH, payload=recipient_hash)]
-        change_matoms = selected_amount - required
-        if change_matoms:
-            outputs.append(Output(change_matoms, TEMPLATE_PKH, payload=change_hash))
+        try:
+            outputs: list[Output] = [Output(amount_matoms, TEMPLATE_PKH, payload=recipient_hash)]
+            change_matoms = selected_amount - required
+            if change_matoms:
+                outputs.append(Output(change_matoms, TEMPLATE_PKH, payload=change_hash))
 
-        unsigned = Transaction(
-            version=FORMAT_EPOCH,
-            sig_type=SIG_TYPE_ED25519,
-            locktime_ms=locktime_ms,
-            lockheight=lockheight,
-            inputs=tuple(Input(utxo.outpoint) for utxo in selected),
-            outputs=tuple(outputs),
-        )
-        return self.sign_transaction(unsigned)
+            unsigned = Transaction(
+                version=FORMAT_EPOCH,
+                sig_type=SIG_TYPE_ED25519,
+                locktime_ms=locktime_ms,
+                lockheight=lockheight,
+                inputs=tuple(Input(utxo.outpoint) for utxo in selected),
+                outputs=tuple(outputs),
+            )
+            return self.sign_transaction(unsigned)
+        except WalletError:
+            raise
+        except ValueError as exc:
+            raise WalletError(f"failed to build wallet transaction: {exc}") from exc
 
     def sign_transaction(self, unsigned_tx: Transaction) -> Transaction:
         """Return ``unsigned_tx`` with every input signed by this wallet."""
@@ -243,14 +250,17 @@ class Wallet:
                     witness=witness,
                 )
             )
-        return Transaction(
-            version=base_tx.version,
-            sig_type=base_tx.sig_type,
-            locktime_ms=base_tx.locktime_ms,
-            lockheight=base_tx.lockheight,
-            inputs=tuple(signed_inputs),
-            outputs=base_tx.outputs,
-        )
+        try:
+            return Transaction(
+                version=base_tx.version,
+                sig_type=base_tx.sig_type,
+                locktime_ms=base_tx.locktime_ms,
+                lockheight=base_tx.lockheight,
+                inputs=tuple(signed_inputs),
+                outputs=base_tx.outputs,
+            )
+        except ValueError as exc:
+            raise WalletError(f"failed to sign wallet transaction: {exc}") from exc
 
     def build_transaction(
         self,

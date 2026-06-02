@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tensorpow.state.utxo import TEMPLATE_PKH, UTXO, Outpoint
+from tensorpow.state.utxo import MAX_SUPPLY_MATOMS, TEMPLATE_PKH, UTXO, Outpoint
 from tensorpow.tx.script import verify_utxo_spend
 from tensorpow.tx.transaction import Transaction
 from tensorpow.wallet import Wallet, WalletError, load_wallet, recover_wallet, utxos_to_json
@@ -58,6 +58,31 @@ def test_wallet_balance_and_insufficient_funds() -> None:
     assert wallet.balance(utxos) == 7
     with pytest.raises(WalletError, match="insufficient"):
         wallet.build_transaction(utxos, other.address, amount_matoms=8, fee_matoms=1)
+
+
+def test_wallet_wraps_invalid_transaction_construction_errors() -> None:
+    wallet = Wallet.recover("11" * 32)
+    recipient = Wallet.recover("22" * 32)
+
+    with pytest.raises(WalletError, match="MAX_SUPPLY_MATOMS"):
+        wallet.build_transaction(
+            (
+                _owned_utxo(wallet, MAX_SUPPLY_MATOMS, 0),
+                _owned_utxo(wallet, 1, 1),
+            ),
+            recipient.address,
+            amount_matoms=MAX_SUPPLY_MATOMS + 1,
+            fee_matoms=0,
+        )
+
+    many_small_utxos = tuple(_owned_utxo(wallet, 1, index) for index in range(80))
+    with pytest.raises(WalletError, match="transaction exceeds"):
+        wallet.build_transaction(
+            many_small_utxos,
+            recipient.address,
+            amount_matoms=len(many_small_utxos),
+            fee_matoms=0,
+        )
 
 
 def test_utxo_json_helpers(tmp_path: Path) -> None:
