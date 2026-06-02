@@ -16,7 +16,14 @@ from tensorpow.mempool import (
     encode_shard_id,
 )
 from tensorpow.node import TensorPowConfig, TensorPowNode
-from tests.adversarial._helpers import anchor, coinbase_tx, fruit, genesis_anchor
+from tensorpow.pow.challenge import GENESIS_PARENT_HASH
+from tests.adversarial._helpers import (
+    anchor,
+    coinbase_tx,
+    fruit,
+    genesis_anchor,
+    trusted_adversarial_pow_verifier,
+)
 
 
 def test_same_parent_shard_fork_conflicts_are_queued_deterministically() -> None:
@@ -73,13 +80,14 @@ def test_node_rejects_malformed_shard_tree_anchor_after_split_fork(tmp_path: Pat
             data_dir=tmp_path / "shard-fork-node",
             expected_genesis_hash=genesis.block_hash(),
         ),
-        pow_verifier=lambda _header, _target, _backend: True,
+        pow_verifier=trusted_adversarial_pow_verifier,
     )
     try:
         seed_fruit = fruit(
             (coinbase_tx(61).to_bytes(),),
             nonce=61,
             timestamp_ms=2,
+            parent_selected=GENESIS_PARENT_HASH,
             latest_anchor=genesis.block_hash(),
         )
         bad_anchor = anchor(

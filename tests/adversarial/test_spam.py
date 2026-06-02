@@ -6,8 +6,17 @@ from pathlib import Path
 
 from tensorpow.mempool import MAX_FRUIT_PAYLOAD_BYTES, ROOT_SHARD_ID, Mempool
 from tensorpow.node import TensorPowConfig, TensorPowNode
+from tensorpow.pow.challenge import GENESIS_PARENT_HASH
 from tensorpow.state.utxo import UTXOSet
-from tests.adversarial._helpers import anchor, coinbase_tx, fruit, genesis_anchor, signed_tx, utxo
+from tests.adversarial._helpers import (
+    anchor,
+    coinbase_tx,
+    fruit,
+    genesis_anchor,
+    signed_tx,
+    trusted_adversarial_pow_verifier,
+    utxo,
+)
 
 
 def test_zero_fee_spam_stays_out_after_empty_fruit_flooding() -> None:
@@ -46,13 +55,14 @@ def test_node_rejects_zero_fee_spam_fruit_after_fee_floor_anchor(tmp_path: Path)
             data_dir=tmp_path / "spam-node",
             expected_genesis_hash=genesis.block_hash(),
         ),
-        pow_verifier=lambda _header, _target, _backend: True,
+        pow_verifier=trusted_adversarial_pow_verifier,
     )
     try:
         floor_seed = fruit(
             (coinbase_tx(51).to_bytes(),),
             nonce=51,
             timestamp_ms=2,
+            parent_selected=GENESIS_PARENT_HASH,
             latest_anchor=genesis.block_hash(),
         )
         high_floor_anchor = anchor(

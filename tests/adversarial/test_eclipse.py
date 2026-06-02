@@ -9,7 +9,14 @@ import pytest
 from tensorpow.chain.blocks import Anchor
 from tensorpow.net import MSG_TYPE_TX, WireDecodeError, decode_wire_message, encode_wire_message
 from tensorpow.node import TensorPowConfig, TensorPowNode
-from tests.adversarial._helpers import anchor, coinbase_tx, fruit, genesis_anchor
+from tensorpow.pow.challenge import GENESIS_PARENT_HASH
+from tests.adversarial._helpers import (
+    anchor,
+    coinbase_tx,
+    fruit,
+    genesis_anchor,
+    trusted_adversarial_pow_verifier,
+)
 
 
 def test_eclipse_packets_are_rejected_and_honest_sync_restores_state(tmp_path: Path) -> None:
@@ -21,6 +28,7 @@ def test_eclipse_packets_are_rejected_and_honest_sync_restores_state(tmp_path: P
             (coinbase_tx(21, amount=50).to_bytes(),),
             nonce=21,
             timestamp_ms=2,
+            parent_selected=GENESIS_PARENT_HASH,
             latest_anchor=genesis.block_hash(),
         )
         honest_anchor = anchor(
@@ -73,5 +81,5 @@ def test_eclipse_packets_are_rejected_and_honest_sync_restores_state(tmp_path: P
 def _node(data_dir: Path, *, genesis: Anchor) -> TensorPowNode:
     return TensorPowNode(
         TensorPowConfig(data_dir=data_dir, expected_genesis_hash=genesis.block_hash()),
-        pow_verifier=lambda _header, _target, _backend: True,
+        pow_verifier=trusted_adversarial_pow_verifier,
     )

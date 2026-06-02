@@ -17,7 +17,8 @@ from tensorpow.crypto.hash import DOMAIN_SHARD_TREE, HASH_LEN_BYTES, domain_hash
 from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT, sign
 from tensorpow.genesis import GENESIS_CHAIN_ID_TESTNET, GenesisInputs, build_genesis_artifact
 from tensorpow.mempool import ROOT_SHARD_ID, ShardTree
-from tensorpow.pow.challenge import FORMAT_EPOCH
+from tensorpow.pow.challenge import FORMAT_EPOCH, PowHeader
+from tensorpow.pow.kernel import Backend
 from tensorpow.state.utxo import TEMPLATE_PKH, UTXO, Outpoint
 from tensorpow.tx.script import pubkey_hash
 from tensorpow.tx.transaction import Input, Output, Transaction
@@ -25,6 +26,9 @@ from tensorpow.tx.transaction import Input, Output, Transaction
 PUBLIC_KEY = bytes.fromhex("343010a1aba8774dd1e6f4f0c3349bae6824908a1e64cd638dc2ed1bc625af1d")
 PRIVATE_KEY = bytes.fromhex("cd4f7f79a2b8168f5cbeccb55d415492fd3504e52ed4fe7b02ea404fede9a40b")
 OWNER_PUBKEY_HASH = pubkey_hash(PUBLIC_KEY)
+ADVERSARY_REORG_COMPUTE_PCT_LIMIT = 40
+HONEST_FRUIT_WORK = 3
+ADVERSARY_FRUIT_WORK = 1
 
 
 def h(index: int) -> bytes:
@@ -104,7 +108,7 @@ def fruit(
     *,
     nonce: int,
     timestamp_ms: int,
-    parent_selected: bytes = bytes(HASH_LEN_BYTES),
+    parent_selected: bytes,
     latest_anchor: bytes = bytes(HASH_LEN_BYTES),
     shard_id: int = ROOT_SHARD_ID,
 ) -> Fruit:
@@ -122,6 +126,16 @@ def fruit(
         nonce=nonce,
     )
     return Fruit(header=header, transactions=transactions)
+
+
+def trusted_adversarial_pow_verifier(
+    _header: PowHeader,
+    _target: bytes,
+    _backend: Backend,
+) -> bool:
+    """Bypass PoW only for adversarial fixtures that isolate graph/state behavior."""
+
+    return True
 
 
 def anchor(

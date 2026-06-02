@@ -13,7 +13,16 @@ from tensorpow.consensus.finality import (
 from tensorpow.consensus.ghostdag import DYNAMIC_K_MIN, BlockDAG, red_set
 from tensorpow.node import TensorPowConfig, TensorPowNode
 from tensorpow.pow.challenge import GENESIS_PARENT_HASH
-from tests.adversarial._helpers import coinbase_tx, fruit, genesis_anchor, h
+from tests.adversarial._helpers import (
+    ADVERSARY_FRUIT_WORK,
+    ADVERSARY_REORG_COMPUTE_PCT_LIMIT,
+    HONEST_FRUIT_WORK,
+    coinbase_tx,
+    fruit,
+    genesis_anchor,
+    h,
+    trusted_adversarial_pow_verifier,
+)
 
 
 def test_late_alternate_history_cannot_replace_economic_fruit() -> None:
@@ -25,7 +34,7 @@ def test_late_alternate_history_cannot_replace_economic_fruit() -> None:
     honest_hashes: list[bytes] = []
     for index in range(2, 2 + FINALITY_ECONOMIC_BLUE_DEPTH + 4):
         honest_hash = h(index)
-        dag.add_fruit(honest_hash, (honest_tip,), timestamp_ms=index)
+        dag.add_fruit(honest_hash, (honest_tip,), timestamp_ms=index, work=HONEST_FRUIT_WORK)
         honest_hashes.append(honest_hash)
         honest_tip = honest_hash
     protected_fruit = honest_hashes[0]
@@ -36,15 +45,22 @@ def test_late_alternate_history_cannot_replace_economic_fruit() -> None:
     alternate_hashes: set[bytes] = set()
     for index in range(500, 514):
         alternate_hash = h(index)
-        dag.add_fruit(alternate_hash, (alternate_tip,), timestamp_ms=index)
+        dag.add_fruit(
+            alternate_hash,
+            (alternate_tip,),
+            timestamp_ms=index,
+            work=ADVERSARY_FRUIT_WORK,
+        )
         alternate_hashes.add(alternate_hash)
         alternate_tip = alternate_hash
 
     merge_tip = h(2_000)
     dag.add_fruit(merge_tip, (honest_tip, alternate_tip), timestamp_ms=700)
 
-    total_post_genesis_work = len(honest_hashes) + len(alternate_hashes)
-    assert len(alternate_hashes) * 100 < 40 * total_post_genesis_work
+    honest_work = len(honest_hashes) * HONEST_FRUIT_WORK
+    alternate_work = len(alternate_hashes) * ADVERSARY_FRUIT_WORK
+    total_post_genesis_work = honest_work + alternate_work
+    assert alternate_work * 100 < ADVERSARY_REORG_COMPUTE_PCT_LIMIT * total_post_genesis_work
     assert dag.ghostdag_data(merge_tip, DYNAMIC_K_MIN).selected_parent == honest_tip
     assert blue_depth(dag, protected_fruit, alternate_tip, DYNAMIC_K_MIN) == 0
     assert alternate_hashes <= red_set(dag, merge_tip, DYNAMIC_K_MIN)
@@ -58,13 +74,14 @@ def test_node_rejects_late_genesis_parent_alternate_history(tmp_path: Path) -> N
             data_dir=tmp_path / "long-range-node",
             expected_genesis_hash=genesis.block_hash(),
         ),
-        pow_verifier=lambda _header, _target, _backend: True,
+        pow_verifier=trusted_adversarial_pow_verifier,
     )
     try:
         honest = fruit(
             (coinbase_tx(41).to_bytes(),),
             nonce=41,
             timestamp_ms=2,
+            parent_selected=GENESIS_PARENT_HASH,
             latest_anchor=genesis.block_hash(),
         )
         late_alternate = fruit(

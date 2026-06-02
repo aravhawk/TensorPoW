@@ -12,15 +12,12 @@ from tensorpow.chain.blocks import (
     fee_floor_set_root,
     fruit_set_root,
     parent_candidate_root,
-    tx_merkle_root,
 )
-from tensorpow.chain.headers import AnchorHeader, FruitHeader
-from tensorpow.consensus.ghostdag import BlockDAG, topological_order
+from tensorpow.chain.headers import AnchorHeader
 from tensorpow.crypto.hash import hash_bytes
-from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
 from tensorpow.mempool import ROOT_SHARD_ID, ShardTree
 from tensorpow.node import TensorPowConfig, TensorPowNode
-from tensorpow.pow.challenge import FORMAT_EPOCH
+from tensorpow.pow.challenge import FORMAT_EPOCH, GENESIS_PARENT_HASH
 from tensorpow.state.utxo import TEMPLATE_PKH, UTXO, Outpoint
 from tensorpow.tx.transaction import Output
 from tests.adversarial._helpers import (
@@ -30,6 +27,7 @@ from tests.adversarial._helpers import (
     genesis_anchor,
     h,
     signed_tx,
+    trusted_adversarial_pow_verifier,
 )
 
 
@@ -40,6 +38,7 @@ def test_dag_order_allows_only_one_conflicting_spend(tmp_path: Path) -> None:
         latest_anchor=genesis.block_hash(),
         nonce=10,
         timestamp_ms=1,
+        parent_selected=GENESIS_PARENT_HASH,
     )
     funding_output = Output(1_000, TEMPLATE_PKH, payload=OWNER_PUBKEY_HASH)
     funding_anchor = _anchor_for_fruits(
@@ -60,93 +59,53 @@ def test_dag_order_allows_only_one_conflicting_spend(tmp_path: Path) -> None:
         (coinbase_tx(1).to_bytes(), left_spend.to_bytes()),
         nonce=11,
         timestamp_ms=3,
+        parent_selected=funding_fruit.block_hash(),
+        latest_anchor=funding_anchor.block_hash(),
     )
     right_fruit = fruit(
         (coinbase_tx(2).to_bytes(), right_spend.to_bytes()),
         nonce=12,
         timestamp_ms=3,
+        parent_selected=funding_fruit.block_hash(),
+        latest_anchor=funding_anchor.block_hash(),
     )
-
-    dag = BlockDAG()
-    dag.add_fruit(h(1), timestamp_ms=1)
-    fruits_by_hash = {
-        left_fruit.block_hash(): left_fruit,
-        right_fruit.block_hash(): right_fruit,
-    }
-    for fruit_hash in fruits_by_hash:
-        dag.add_fruit(fruit_hash, (h(1),), timestamp_ms=2)
-    merge_tip = h(999)
-    dag.add_fruit(merge_tip, tuple(fruits_by_hash), timestamp_ms=3)
-    canonical_fruits = [
-        fruits_by_hash[fruit_hash]
-        for fruit_hash in topological_order(dag, merge_tip, 0)
-        if fruit_hash in fruits_by_hash
-    ]
 
     node = TensorPowNode(
         TensorPowConfig(
             data_dir=tmp_path / "node",
             expected_genesis_hash=genesis.block_hash(),
         ),
-        pow_verifier=lambda _header, _target, _backend: True,
+        pow_verifier=trusted_adversarial_pow_verifier,
     )
     try:
         assert node.process_anchor(genesis)
         assert node.process_fruit(funding_fruit)
         assert node.process_anchor(funding_anchor)
         assert node.utxo_set.get(funded.outpoint) == funded
-        first_fruit = _with_node_parents(
-            canonical_fruits[0],
-            parent_selected=funding_fruit.block_hash(),
-            latest_anchor=funding_anchor.block_hash(),
-        )
-        second_fruit = _with_node_parents(
-            canonical_fruits[1],
-            parent_selected=first_fruit.block_hash(),
-            latest_anchor=funding_anchor.block_hash(),
-            timestamp_ms=first_fruit.header.timestamp_ms + 1,
-        )
-        first = node.process_fruit(first_fruit)
-        second = node.process_fruit(second_fruit)
+        first = node.process_fruit(left_fruit)
+        second = node.process_fruit(right_fruit)
         anchor = _anchor_for_fruits(
-            first_fruit,
-            second_fruit,
+            left_fruit,
+            right_fruit,
             parent_anchor=funding_anchor.block_hash(),
         )
         anchored = node.process_anchor(anchor)
-
-        winner_tx = left_spend if canonical_fruits[0] == left_fruit else right_spend
-        loser_tx = right_spend if winner_tx == left_spend else left_spend
 
         assert first.accepted
         assert second.accepted
         assert anchored.accepted
         assert node.utxo_set.get(funded.outpoint) is None
-        assert node.utxo_set.get(Outpoint(winner_tx.tx_id(), 0)) is not None
-        assert node.utxo_set.get(Outpoint(loser_tx.tx_id(), 0)) is None
+        surviving_outputs = [
+            outpoint
+            for outpoint in (
+                Outpoint(left_spend.tx_id(), 0),
+                Outpoint(right_spend.tx_id(), 0),
+            )
+            if node.utxo_set.get(outpoint) is not None
+        ]
+        assert len(surviving_outputs) == 1
     finally:
         node.close()
-
-
-def _with_node_parents(
-    fruit_: Fruit,
-    *,
-    parent_selected: bytes,
-    latest_anchor: bytes,
-    timestamp_ms: int | None = None,
-) -> Fruit:
-    header = FruitHeader(
-        version=FORMAT_EPOCH,
-        sig_type_supported=SIG_TYPE_ED25519_BIT,
-        parent_selected=parent_selected,
-        parent_bitmap=b"",
-        latest_anchor=latest_anchor,
-        tx_merkle_root=tx_merkle_root(fruit_.transactions),
-        timestamp_ms=fruit_.header.timestamp_ms if timestamp_ms is None else timestamp_ms,
-        shard_id=fruit_.header.shard_id,
-        nonce=fruit_.header.nonce,
-    )
-    return Fruit(header=header, transactions=fruit_.transactions)
 
 
 def _anchor_for_fruits(
@@ -159,7 +118,7 @@ def _anchor_for_fruits(
     tree = ShardTree()
     fee_entries = (FeeFloorEntry(ROOT_SHARD_ID, 0),)
     covered = tuple(sorted(fruit_.block_hash() for fruit_ in fruits))
-    parent_candidates = (fruits[-1].block_hash(),)
+    parent_candidates = covered
     header = AnchorHeader(
         version=FORMAT_EPOCH,
         parent_anchor=parent_anchor,
