@@ -57,7 +57,7 @@ U64_BYTES: Final[int] = 8
 DAS_SAMPLE_REQUEST_BYTES: Final[int] = HASH_LEN_BYTES + (3 * U32_BYTES)
 U32_MAX: Final[int] = 0xFFFFFFFF
 U64_MAX: Final[int] = 0xFFFFFFFFFFFFFFFF
-_DAS_MAX_EXTENDED_SIDE: Final[int] = 255
+_DAS_MAX_EXTENDED_SIDE: Final[int] = DAS_MAX_DATA_SIDE * DAS_RS_EXTENSION_FACTOR
 _DAS_MAX_MERKLE_SIBLINGS: Final[int] = 32
 
 _DAS_COMMITMENT_PREFIX: Final[bytes] = b"TensorPoW:DAS:commit"
@@ -903,6 +903,8 @@ def _require_wire_side(name: str, value: int) -> int:
     _require_positive_u32(name, value)
     if value > _DAS_MAX_EXTENDED_SIDE:
         raise ValueError(f"{name} exceeds DAS extended side limit")
+    if value % DAS_RS_EXTENSION_FACTOR != 0:
+        raise ValueError(f"{name} must be an even DAS extended side")
     return value
 
 
