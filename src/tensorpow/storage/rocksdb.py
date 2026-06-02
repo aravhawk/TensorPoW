@@ -161,12 +161,27 @@ class RocksDBStore:
     def close(self) -> None:
         """Flush and close all column-family handles."""
 
-        self.flush(sync=True)
-        for column in self._columns.values():
-            column.close()
-        self._columns.clear()
-        self._handles.clear()
-        self._db.close()
+        first_error: BaseException | None = None
+        try:
+            self.flush(sync=True)
+        except BaseException as error:
+            first_error = error
+        finally:
+            for column in tuple(self._columns.values()):
+                try:
+                    column.close()
+                except BaseException as error:
+                    if first_error is None:
+                        first_error = error
+            self._columns.clear()
+            self._handles.clear()
+            try:
+                self._db.close()
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
     def flush(self, *, sync: bool = True) -> None:
         """Flush memtables and optionally fsync the WAL."""

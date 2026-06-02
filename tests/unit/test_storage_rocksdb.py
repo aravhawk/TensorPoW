@@ -9,6 +9,8 @@ import textwrap
 import time
 from pathlib import Path
 
+import pytest
+
 from tensorpow.chain.blocks import Fruit, tx_merkle_root
 from tensorpow.chain.headers import FruitHeader
 from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
@@ -116,6 +118,29 @@ def test_checkpoint_snapshot_and_repair_recover_consistent_state(tmp_path: Path)
     assert recovered.get(COLUMN_DAG, b"k1") == b"value-one"
     assert recovered.get(COLUMN_DAG, b"k2") == b"value-two"
     recovered.close()
+
+
+def test_close_releases_handles_when_flush_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "db"
+    store = RocksDBStore(db_path)
+    store.put(COLUMN_DAG, b"k", b"value")
+
+    def fail_flush(*, sync: bool = True) -> None:
+        raise RuntimeError(f"flush failed sync={sync}")
+
+    monkeypatch.setattr(store, "flush", fail_flush)
+
+    with pytest.raises(RuntimeError, match="flush failed"):
+        store.close()
+
+    assert store._columns == {}
+    assert store._handles == {}
+    reopened = RocksDBStore(db_path)
+    assert reopened.get(COLUMN_DAG, b"k") == b"value"
+    reopened.close()
 
 
 def test_reopen_after_killed_writer_preserves_batch_consistency(tmp_path: Path) -> None:
