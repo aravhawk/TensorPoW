@@ -405,9 +405,20 @@ Total reward weight inside an anchor interval is work proportional:
 - The anchor contributes `anchor_work_weight`, computed from the ratio between
   `FRUIT_TARGET_LE` and the active anchor target and clamped to `uint64`.
 
-The interval subsidy is distributed by integer floor division over those weights.
-Remainder subunits are assigned by ascending recipient hash, one subunit at a
-time, until exhausted.
+The interval subsidy is first split into a fruit pool and an anchor pool:
+
+```text
+fruit_weight = covered_fruit_count * FRUIT_REWARD_WEIGHT
+anchor_weight = anchor_work_weight(anchor_target)
+fruit_pool = floor(interval_subsidy * fruit_weight / (fruit_weight + anchor_weight))
+anchor_pool = interval_subsidy - fruit_pool
+```
+
+If no fruits are covered, `fruit_pool = 0` and `anchor_pool = interval_subsidy`.
+This two-pool split assigns any top-level remainder from the fruit/anchor split
+to `anchor_pool`. The fruit pool is then distributed over covered fruits by
+integer floor division; any fruit-pool remainder subunits are assigned by
+ascending `(reward_key, fruit_hash)`, one subunit at a time, until exhausted.
 
 ---
 

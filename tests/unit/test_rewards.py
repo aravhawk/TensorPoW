@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tensorpow.consensus.anchor_daa import ANCHOR_INITIAL_TARGET_LE
+from tensorpow.consensus.anchor_daa import ANCHOR_INITIAL_TARGET_LE, anchor_work_weight
 from tensorpow.consensus.rewards import (
     COINBASE_MATURITY_ANCHORS,
     HALVING_INTERVAL_ANCHORS,
@@ -59,6 +59,30 @@ def test_reward_pools_expose_anchor_claim_path() -> None:
         interval_subsidy=10_000,
         anchor_target=ANCHOR_INITIAL_TARGET_LE,
     ) == (0, 10_000)
+
+
+def test_reward_pools_route_top_level_remainder_to_anchor_pool() -> None:
+    fruit_a = bytes.fromhex("aa" * 32)
+    fruit_b = bytes.fromhex("bb" * 32)
+    anchor_weight = anchor_work_weight(ANCHOR_INITIAL_TARGET_LE)
+    interval_subsidy = anchor_weight + 3
+
+    fruit_pool, anchor_pool = reward_pools(
+        fruit_count=2,
+        interval_subsidy=interval_subsidy,
+        anchor_target=ANCHOR_INITIAL_TARGET_LE,
+    )
+    assignments = fruit_subsidy_assignments(
+        {
+            fruit_b: bytes.fromhex("01" * 32),
+            fruit_a: bytes.fromhex("00" * 32),
+        },
+        interval_subsidy=interval_subsidy,
+        anchor_target=ANCHOR_INITIAL_TARGET_LE,
+    )
+
+    assert (fruit_pool, anchor_pool) == (2, anchor_weight + 1)
+    assert assignments == {fruit_a: 1, fruit_b: 1}
 
 
 def test_coinbase_maturity_height_and_malformed_inputs() -> None:
