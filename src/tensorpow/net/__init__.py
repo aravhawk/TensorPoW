@@ -74,6 +74,7 @@ from tensorpow.net.libp2p_node import (
     WireMessage,
     decode_wire_message,
     encode_wire_message,
+    message_type_for_topic,
     topic_for_shard_txs,
 )
 from tensorpow.net.turbine import (
@@ -179,6 +180,7 @@ __all__ = [
     "encode_wire_message",
     "erlay_topic_for_shard",
     "is_available",
+    "message_type_for_topic",
     "reconstruct_fruit",
     "select_dropout_peers",
     "select_sample_request",

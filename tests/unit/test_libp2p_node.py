@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 import trio
 
-from tensorpow.mempool.shard_tree import encode_shard_id
 from tensorpow.net import (
     MSG_TYPE_FRUIT,
     MSG_TYPE_TX,
@@ -16,6 +15,7 @@ from tensorpow.net import (
     WireDecodeError,
     decode_wire_message,
     encode_wire_message,
+    message_type_for_topic,
     topic_for_shard_txs,
 )
 
@@ -27,7 +27,9 @@ def test_wire_message_round_trip_and_topic_names() -> None:
 
     assert decoded.message_type == MSG_TYPE_FRUIT
     assert decoded.payload == payload
-    assert topic_for_shard_txs(encode_shard_id(3, 5)) == "tensorpow/txs/00030005/main"
+    assert topic_for_shard_txs(0x00030005) == "tensorpow/txs/00030005/main"
+    assert message_type_for_topic(TOPIC_FRUITS) == MSG_TYPE_FRUIT
+    assert message_type_for_topic(topic_for_shard_txs(0x00030005)) == MSG_TYPE_TX
 
 
 def test_wire_message_rejects_malformed_inputs() -> None:
@@ -62,6 +64,44 @@ def test_node_identity_peer_id_is_persistent() -> None:
         NodeIdentity(b"short")
 
 
+def test_publish_wraps_payload_in_topic_wire_message() -> None:
+    trio.run(_publish_wraps_payload_in_topic_wire_message)
+
+
+async def _publish_wraps_payload_in_topic_wire_message() -> None:
+    node = LibP2PNode()
+    pubsub = _FakePubSub()
+    node._pubsub = pubsub
+
+    await node.publish(TOPIC_FRUITS, b"hello")
+
+    assert pubsub.topic == TOPIC_FRUITS
+    decoded = decode_wire_message(pubsub.payload)
+    assert decoded.message_type == MSG_TYPE_FRUIT
+    assert decoded.payload == b"hello"
+
+
+def test_next_message_decodes_wire_envelope_and_rejects_topic_mismatch() -> None:
+    trio.run(_next_message_decodes_wire_envelope_and_rejects_topic_mismatch)
+
+
+async def _next_message_decodes_wire_envelope_and_rejects_topic_mismatch() -> None:
+    node = LibP2PNode()
+    node._subscriptions[TOPIC_FRUITS] = _FakeSubscription(
+        TOPIC_FRUITS,
+        encode_wire_message(MSG_TYPE_FRUIT, b"hello"),
+    )
+
+    assert await node.next_message(TOPIC_FRUITS, timeout_seconds=1) == b"hello"
+
+    node._subscriptions[TOPIC_FRUITS] = _FakeSubscription(
+        TOPIC_FRUITS,
+        encode_wire_message(MSG_TYPE_TX, b"wrong-topic"),
+    )
+    with pytest.raises(LibP2PNodeError, match="message_type"):
+        await node.next_message(TOPIC_FRUITS, timeout_seconds=1)
+
+
 def test_two_libp2p_nodes_connect_find_peer_and_gossipsub_roundtrip() -> None:
     trio.run(_libp2p_roundtrip)
 
@@ -76,12 +116,35 @@ async def _libp2p_roundtrip() -> None:
 
         await subscriber.subscribe(TOPIC_FRUITS)
         await trio.sleep(0.5)
-        payload = encode_wire_message(MSG_TYPE_FRUIT, b"hello")
-        await publisher.publish(TOPIC_FRUITS, payload)
+        await publisher.publish(TOPIC_FRUITS, b"hello")
         received = await subscriber.next_message(TOPIC_FRUITS, timeout_seconds=5)
-        assert decode_wire_message(received).payload == b"hello"
+        assert received == b"hello"
 
     async with LibP2PNode(identity=identity) as restarted:
         assert restarted.peer_id == identity.peer_id()
         with pytest.raises(LibP2PNodeError, match="subscribed"):
             await restarted.next_message(TOPIC_FRUITS, timeout_seconds=0.01)
+
+
+class _FakePubSub:
+    def __init__(self) -> None:
+        self.topic = ""
+        self.payload = b""
+
+    async def publish(self, topic: str, payload: bytes) -> None:
+        self.topic = topic
+        self.payload = payload
+
+
+class _FakeSubscription:
+    def __init__(self, topic: str, payload: bytes) -> None:
+        self._message = _FakeMessage(topic, payload)
+
+    async def get(self) -> _FakeMessage:
+        return self._message
+
+
+class _FakeMessage:
+    def __init__(self, topic: str, payload: bytes) -> None:
+        self.topicIDs = (topic,)
+        self.data = payload

@@ -233,14 +233,14 @@ class LibP2PNode:
         self._subscriptions[topic] = await self._require_pubsub().subscribe(topic)
 
     async def publish(self, topic: str, payload: bytes) -> None:
-        """Publish raw payload bytes to a GossipSub topic."""
+        """Publish payload bytes inside the topic's TensorPoW wire envelope."""
 
         _require_topic(topic)
-        _require_payload(payload)
-        await self._require_pubsub().publish(topic, payload)
+        wire_payload = encode_wire_message(message_type_for_topic(topic), payload)
+        await self._require_pubsub().publish(topic, wire_payload)
 
     async def next_message(self, topic: str, *, timeout_seconds: float = 5.0) -> bytes:
-        """Return the next message payload for a subscribed topic."""
+        """Return the next decoded payload for a subscribed topic."""
 
         _require_topic(topic)
         if timeout_seconds <= 0:
@@ -253,7 +253,14 @@ class LibP2PNode:
             message = await subscription.get()
         if topic not in message.topicIDs:
             raise LibP2PNodeError("received message for unexpected topic")
-        return bytes(message.data)
+        try:
+            wire_message = decode_wire_message(bytes(message.data))
+        except WireDecodeError as error:
+            raise LibP2PNodeError("received malformed wire message") from error
+        expected_message_type = message_type_for_topic(topic)
+        if wire_message.message_type != expected_message_type:
+            raise LibP2PNodeError("received wire message_type for unexpected topic")
+        return wire_message.payload
 
     def _require_host(self) -> Any:
         if self._host is None:
@@ -271,6 +278,19 @@ def topic_for_shard_txs(shard_id: ShardId) -> str:
 
     shard_id = require_shard_id(shard_id)
     return f"{TOPIC_TXS_PREFIX}{shard_id:08x}{TOPIC_TXS_SUFFIX}"
+
+
+def message_type_for_topic(topic: str) -> int:
+    """Return the expected wire message type for a canonical GossipSub topic."""
+
+    _require_topic(topic)
+    if topic == TOPIC_FRUITS:
+        return MSG_TYPE_FRUIT
+    if topic == TOPIC_ANCHORS:
+        return MSG_TYPE_ANCHOR
+    if _is_shard_tx_topic(topic):
+        return MSG_TYPE_TX
+    raise ValueError("topic has no wire message type")
 
 
 def encode_wire_message(message_type: int, payload: bytes) -> bytes:
@@ -342,6 +362,19 @@ def _require_topic(topic: str) -> None:
         raise TypeError("topic must be str")
     if topic == "":
         raise ValueError("topic must not be empty")
+
+
+def _is_shard_tx_topic(topic: str) -> bool:
+    if not topic.startswith(TOPIC_TXS_PREFIX) or not topic.endswith(TOPIC_TXS_SUFFIX):
+        return False
+    encoded = topic[len(TOPIC_TXS_PREFIX) : -len(TOPIC_TXS_SUFFIX)]
+    if len(encoded) != 8:
+        return False
+    try:
+        int(encoded, 16)
+    except ValueError:
+        return False
+    return encoded.lower() == encoded
 
 
 def _require_bool(name: str, value: bool) -> bool:
@@ -434,5 +467,6 @@ __all__ = [
     "WireMessage",
     "decode_wire_message",
     "encode_wire_message",
+    "message_type_for_topic",
     "topic_for_shard_txs",
 ]
