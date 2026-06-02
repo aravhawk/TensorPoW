@@ -37,13 +37,25 @@ def test_eclipse_packets_are_rejected_and_honest_sync_restores_state(tmp_path: P
         malformed_tx_message = encode_wire_message(MSG_TYPE_TX, b"not-a-transaction")
         decoded = decode_wire_message(malformed_tx_message)
         tx_result, add_result = victim.process_raw_tx(decoded.payload)
-        bad_anchor = anchor(nonce=23)
+        bad_anchor = anchor(
+            shard_tree_bytes=b"\x02\x00\x00\x00",
+            covered_fruit_hashes=(honest_fruit.block_hash(),),
+            parent_anchor=genesis.block_hash(),
+            timestamp_ms=3,
+            nonce=23,
+        )
 
         assert decoded.message_type == MSG_TYPE_TX
         assert tx_result.reason == "malformed_tx"
         assert add_result is None
-        assert victim.process_anchor(bad_anchor).reason == "wrong_genesis"
         assert victim.status()["blocks"] == 0
+        ordinary = _node(tmp_path / "ordinary", genesis=genesis)
+        try:
+            assert ordinary.process_anchor(genesis)
+            assert ordinary.process_fruit(honest_fruit)
+            assert ordinary.process_anchor(bad_anchor).reason == "bad_shard_tree"
+        finally:
+            ordinary.close()
 
         with pytest.raises(WireDecodeError, match="checksum"):
             decode_wire_message(malformed_tx_message[:-1] + bytes([malformed_tx_message[-1] ^ 1]))
