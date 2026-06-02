@@ -6,16 +6,17 @@ from pathlib import Path
 
 import pytest
 
+from tensorpow.chain.blocks import Anchor
 from tensorpow.net import MSG_TYPE_TX, WireDecodeError, decode_wire_message, encode_wire_message
 from tensorpow.node import TensorPowConfig, TensorPowNode
 from tests.adversarial._helpers import anchor, coinbase_tx, fruit, genesis_anchor
 
 
 def test_eclipse_packets_are_rejected_and_honest_sync_restores_state(tmp_path: Path) -> None:
-    honest = _node(tmp_path / "honest")
-    victim = _node(tmp_path / "victim")
+    genesis = genesis_anchor()
+    honest = _node(tmp_path / "honest", genesis=genesis)
+    victim = _node(tmp_path / "victim", genesis=genesis)
     try:
-        genesis = genesis_anchor()
         honest_fruit = fruit(
             (coinbase_tx(21, amount=50).to_bytes(),),
             nonce=21,
@@ -36,12 +37,12 @@ def test_eclipse_packets_are_rejected_and_honest_sync_restores_state(tmp_path: P
         malformed_tx_message = encode_wire_message(MSG_TYPE_TX, b"not-a-transaction")
         decoded = decode_wire_message(malformed_tx_message)
         tx_result, add_result = victim.process_raw_tx(decoded.payload)
-        bad_anchor = anchor(shard_tree_bytes=b"\x02\x00\x00\x00", nonce=23)
+        bad_anchor = anchor(nonce=23)
 
         assert decoded.message_type == MSG_TYPE_TX
         assert tx_result.reason == "malformed_tx"
         assert add_result is None
-        assert victim.process_anchor(bad_anchor).reason == "bad_shard_tree"
+        assert victim.process_anchor(bad_anchor).reason == "wrong_genesis"
         assert victim.status()["blocks"] == 0
 
         with pytest.raises(WireDecodeError, match="checksum"):
@@ -57,8 +58,8 @@ def test_eclipse_packets_are_rejected_and_honest_sync_restores_state(tmp_path: P
         victim.close()
 
 
-def _node(data_dir: Path) -> TensorPowNode:
+def _node(data_dir: Path, *, genesis: Anchor) -> TensorPowNode:
     return TensorPowNode(
-        TensorPowConfig(data_dir=data_dir),
+        TensorPowConfig(data_dir=data_dir, expected_genesis_hash=genesis.block_hash()),
         pow_verifier=lambda _header, _target, _backend: True,
     )

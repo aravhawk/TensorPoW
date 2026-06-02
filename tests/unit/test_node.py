@@ -166,6 +166,17 @@ def test_expected_genesis_hash_is_enforced(tmp_path: Path) -> None:
     node.close()
 
 
+def test_unpinned_genesis_hash_is_rejected(tmp_path: Path) -> None:
+    genesis = _genesis_anchor()
+    node = TensorPowNode(
+        TensorPowConfig(data_dir=tmp_path / "node"),
+        pow_verifier=lambda _header, _target, _backend: True,
+    )
+
+    assert node.process_anchor(genesis).reason == "missing_expected_genesis_hash"
+    node.close()
+
+
 def test_fruit_dependencies_pow_and_coinbase_limits_are_required(tmp_path: Path) -> None:
     node = _node(tmp_path / "node")
     genesis = _genesis_anchor()
@@ -193,11 +204,15 @@ def test_fruit_dependencies_pow_and_coinbase_limits_are_required(tmp_path: Path)
 
 
 def test_pow_verifier_rejection_blocks_fruit_and_anchor(tmp_path: Path) -> None:
+    genesis = _genesis_anchor()
     node = TensorPowNode(
-        TensorPowConfig(data_dir=tmp_path / "node"),
+        TensorPowConfig(
+            data_dir=tmp_path / "node",
+            chain_id=GENESIS_CHAIN_ID_TESTNET,
+            expected_genesis_hash=genesis.block_hash(),
+        ),
         pow_verifier=lambda _header, _target, _backend: False,
     )
-    genesis = _genesis_anchor()
     fruit = _fruit((_coinbase_tx(10).to_bytes(),), latest_anchor=genesis.block_hash())
     anchor = _anchor(fruit.block_hash(), parent_anchor=genesis.block_hash())
 
@@ -210,7 +225,11 @@ def test_pow_verifier_rejection_blocks_fruit_and_anchor(tmp_path: Path) -> None:
         assert accepting.process_anchor(genesis)
         assert accepting.process_fruit(fruit)
         rejecting_anchor = TensorPowNode(
-            TensorPowConfig(data_dir=tmp_path / "rejecting-anchor"),
+            TensorPowConfig(
+                data_dir=tmp_path / "rejecting-anchor",
+                chain_id=GENESIS_CHAIN_ID_TESTNET,
+                expected_genesis_hash=genesis.block_hash(),
+            ),
             pow_verifier=lambda _header, _target, _backend: False,
         )
         try:
@@ -666,8 +685,13 @@ def _coinbase_tx(seed: int) -> Transaction:
 
 
 def _node(data_dir: Path) -> TensorPowNode:
+    genesis = _genesis_anchor()
     return TensorPowNode(
-        TensorPowConfig(data_dir=data_dir),
+        TensorPowConfig(
+            data_dir=data_dir,
+            chain_id=GENESIS_CHAIN_ID_TESTNET,
+            expected_genesis_hash=genesis.block_hash(),
+        ),
         pow_verifier=lambda _header, _target, _backend: True,
     )
 

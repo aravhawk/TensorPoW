@@ -84,7 +84,10 @@ def test_dag_order_allows_only_one_conflicting_spend(tmp_path: Path) -> None:
     ]
 
     node = TensorPowNode(
-        TensorPowConfig(data_dir=tmp_path / "node"),
+        TensorPowConfig(
+            data_dir=tmp_path / "node",
+            expected_genesis_hash=genesis.block_hash(),
+        ),
         pow_verifier=lambda _header, _target, _backend: True,
     )
     try:

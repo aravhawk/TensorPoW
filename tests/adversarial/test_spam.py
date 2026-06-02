@@ -40,12 +40,15 @@ def test_zero_fee_spam_stays_out_after_empty_fruit_flooding() -> None:
 
 
 def test_node_rejects_zero_fee_spam_fruit_after_fee_floor_anchor(tmp_path: Path) -> None:
+    genesis = genesis_anchor()
     node = TensorPowNode(
-        TensorPowConfig(data_dir=tmp_path / "spam-node"),
+        TensorPowConfig(
+            data_dir=tmp_path / "spam-node",
+            expected_genesis_hash=genesis.block_hash(),
+        ),
         pow_verifier=lambda _header, _target, _backend: True,
     )
     try:
-        genesis = genesis_anchor()
         floor_seed = fruit(
             (coinbase_tx(51).to_bytes(),),
             nonce=51,

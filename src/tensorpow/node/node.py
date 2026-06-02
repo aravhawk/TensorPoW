@@ -493,10 +493,9 @@ class TensorPowNode:
         if is_genesis_anchor:
             if self.store.items(COLUMN_BODIES):
                 return "genesis_not_first"
-            if (
-                self.config.expected_genesis_hash is not None
-                and anchor.block_hash() != self.config.expected_genesis_hash
-            ):
+            if self.config.expected_genesis_hash is None:
+                return "missing_expected_genesis_hash"
+            if anchor.block_hash() != self.config.expected_genesis_hash:
                 return "wrong_genesis"
             return None
 

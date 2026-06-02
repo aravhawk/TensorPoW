@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+from dataclasses import replace
 from http import HTTPStatus
 from pathlib import Path
 from threading import Event, Thread
@@ -102,6 +103,23 @@ def test_genesis_artifact_is_deterministic_and_chain_separated() -> None:
     bad_header_hash["anchor_header_hash"] = "99" * 32
     with pytest.raises(GenesisError, match="anchor_header_hash"):
         artifact_from_json(bad_header_hash)
+
+
+def test_genesis_inputs_require_canonical_empty_state_roots() -> None:
+    inputs = GenesisInputs.create(
+        chain_id=GENESIS_CHAIN_ID_TESTNET,
+        whitepaper_hash=bytes.fromhex("11" * 32),
+        bitcoin_block_hash=bytes.fromhex("22" * 32),
+        ethereum_block_hash=bytes.fromhex("33" * 32),
+        founder_pubkey_hash=bytes.fromhex("44" * 32),
+    )
+
+    with pytest.raises(GenesisError, match="empty_utxo_root"):
+        replace(inputs, empty_utxo_root=bytes.fromhex("55" * 32))
+    with pytest.raises(GenesisError, match="initial_shard_tree_root"):
+        replace(inputs, initial_shard_tree_root=bytes.fromhex("66" * 32))
+    with pytest.raises(GenesisError, match="initial_fee_floor_root"):
+        replace(inputs, initial_fee_floor_root=bytes.fromhex("77" * 32))
 
 
 def test_genesis_ceremony_cli_records_public_founder_material(tmp_path: Path) -> None:

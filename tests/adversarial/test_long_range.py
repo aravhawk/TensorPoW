@@ -52,12 +52,15 @@ def test_late_alternate_history_cannot_replace_economic_fruit() -> None:
 
 
 def test_node_rejects_late_genesis_parent_alternate_history(tmp_path: Path) -> None:
+    genesis = genesis_anchor()
     node = TensorPowNode(
-        TensorPowConfig(data_dir=tmp_path / "long-range-node"),
+        TensorPowConfig(
+            data_dir=tmp_path / "long-range-node",
+            expected_genesis_hash=genesis.block_hash(),
+        ),
         pow_verifier=lambda _header, _target, _backend: True,
     )
     try:
-        genesis = genesis_anchor()
         honest = fruit(
             (coinbase_tx(41).to_bytes(),),
             nonce=41,

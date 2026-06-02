@@ -65,6 +65,12 @@ class GenesisInputs:
         _require_hash("empty_utxo_root", self.empty_utxo_root)
         _require_hash("initial_shard_tree_root", self.initial_shard_tree_root)
         _require_hash("initial_fee_floor_root", self.initial_fee_floor_root)
+        if self.empty_utxo_root != UTXOSet().merkle_root():
+            raise GenesisError("empty_utxo_root must match the canonical empty UTXO root")
+        if self.initial_shard_tree_root != ShardTree().state_root():
+            raise GenesisError("initial_shard_tree_root must match the canonical root shard tree")
+        if self.initial_fee_floor_root != fee_floor_set_root(_genesis_fee_floor_entries()):
+            raise GenesisError("initial_fee_floor_root must match the canonical zero fee floor")
 
     @classmethod
     def create(
@@ -144,6 +150,10 @@ class GenesisArtifact:
             raise TypeError("anchor must be Anchor")
         if self.anchor.genesis_commitment != self.inputs.commitment():
             raise GenesisError("anchor genesis commitment does not match inputs")
+        if self.anchor.header.shard_tree_state_root != self.inputs.initial_shard_tree_root:
+            raise GenesisError("anchor shard tree root does not match inputs")
+        if self.anchor.header.fee_floor_set_root != self.inputs.initial_fee_floor_root:
+            raise GenesisError("anchor fee floor root does not match inputs")
 
     @property
     def block_hash(self) -> bytes:

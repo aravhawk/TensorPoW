@@ -595,13 +595,18 @@ def _run_platform(config: SoakConfig, platform: PlatformRun) -> SoakResult:
         prefix=f"tensorpow-soak-{_safe_label(platform.label)}-",
         dir=None if data_parent is None else str(data_parent),
     ) as temp_dir:
+        genesis = _genesis_anchor(config.seed)
         node = TensorPowNode(
-            TensorPowConfig(data_dir=Path(temp_dir) / "node"),
+            TensorPowConfig(
+                data_dir=Path(temp_dir) / "node",
+                expected_genesis_hash=genesis.block_hash(),
+            ),
             pow_verifier=_soak_pow_verifier,
         )
         try:
             result = _run_node_workload(
                 config=config,
+                genesis=genesis,
                 node=node,
                 platform=platform,
                 resolved_backend=resolved_backend,
@@ -616,6 +621,7 @@ def _run_platform(config: SoakConfig, platform: PlatformRun) -> SoakResult:
 def _run_node_workload(
     *,
     config: SoakConfig,
+    genesis: Anchor,
     node: TensorPowNode,
     platform: PlatformRun,
     resolved_backend: Literal["cpu", "cuda", "mps"],
@@ -623,7 +629,6 @@ def _run_node_workload(
     start: float,
 ) -> SoakResult:
     wallets = tuple(_wallet(config.seed, index) for index in range(WALLET_COUNT))
-    genesis = _genesis_anchor(config.seed)
     _require_accepted("genesis", node.process_anchor(genesis))
     last_fruit_hash = GENESIS_PARENT_HASH
     last_anchor_hash = genesis.block_hash()

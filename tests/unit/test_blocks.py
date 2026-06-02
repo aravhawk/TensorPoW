@@ -19,6 +19,7 @@ from tensorpow.chain.blocks import (
 from tensorpow.chain.headers import AnchorHeader, FruitHeader
 from tensorpow.crypto.hash import DOMAIN_SHARD_TREE, HASH_LEN_BYTES, domain_hash
 from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
+from tensorpow.mempool import ROOT_SHARD_ID, ShardTree
 from tensorpow.pow.challenge import FORMAT_EPOCH, GENESIS_PARENT_HASH
 from tensorpow.state.utxo import TEMPLATE_PKH
 from tensorpow.tx.transaction import Output
@@ -183,16 +184,61 @@ def test_anchor_body_rejects_unsorted_duplicates_bad_roots_and_empty_nongenesis(
             shard_tree_bytes=b"",
             fee_floor_entries=(),
         )
+
+    with pytest.raises(ValueError, match="canonical root shard tree"):
+        Anchor(
+            header=empty_header,
+            covered_fruit_hashes=(),
+            parent_candidate_hashes=(),
+            shard_tree_bytes=b"",
+            fee_floor_entries=(),
+            genesis_commitment=bytes([1]) * HASH_LEN_BYTES,
+        )
+
+    canonical_tree = ShardTree()
+    canonical_fees = (FeeFloorEntry(ROOT_SHARD_ID, 0),)
+    genesis_header = AnchorHeader(
+        version=FORMAT_EPOCH,
+        parent_anchor=GENESIS_PARENT_HASH,
+        fruit_set_root=fruit_set_root(()),
+        parent_candidate_root=parent_candidate_root(()),
+        shard_tree_state_root=canonical_tree.state_root(),
+        fee_floor_set_root=fee_floor_set_root(canonical_fees),
+        anchor_reward_root=anchor_reward_root(()),
+        timestamp_ms=0,
+        nonce=0,
+    )
     genesis = Anchor(
-        header=empty_header,
+        header=genesis_header,
         covered_fruit_hashes=(),
         parent_candidate_hashes=(),
-        shard_tree_bytes=b"",
-        fee_floor_entries=(),
+        shard_tree_bytes=canonical_tree.serialize(),
+        fee_floor_entries=canonical_fees,
         genesis_commitment=bytes([1]) * HASH_LEN_BYTES,
     )
     assert Anchor.deserialize(genesis.serialize()) == genesis
     assert genesis.block_hash() != genesis.header.header_hash()
+
+    bad_fee_header = AnchorHeader(
+        version=FORMAT_EPOCH,
+        parent_anchor=GENESIS_PARENT_HASH,
+        fruit_set_root=fruit_set_root(()),
+        parent_candidate_root=parent_candidate_root(()),
+        shard_tree_state_root=canonical_tree.state_root(),
+        fee_floor_set_root=fee_floor_set_root((FeeFloorEntry(ROOT_SHARD_ID, 1),)),
+        anchor_reward_root=anchor_reward_root(()),
+        timestamp_ms=0,
+        nonce=0,
+    )
+    with pytest.raises(ValueError, match="zero root-shard fee floor"):
+        Anchor(
+            header=bad_fee_header,
+            covered_fruit_hashes=(),
+            parent_candidate_hashes=(),
+            shard_tree_bytes=canonical_tree.serialize(),
+            fee_floor_entries=(FeeFloorEntry(ROOT_SHARD_ID, 1),),
+            genesis_commitment=bytes([1]) * HASH_LEN_BYTES,
+        )
 
     with pytest.raises(ValueError, match="must not cover fruits"):
         Anchor(
@@ -208,9 +254,9 @@ def test_anchor_body_rejects_unsorted_duplicates_bad_roots_and_empty_nongenesis(
         parent_anchor=bytes([9]) * HASH_LEN_BYTES,
         fruit_set_root=fruit_set_root(()),
         parent_candidate_root=parent_candidate_root(()),
-        shard_tree_state_root=empty_header.shard_tree_state_root,
-        fee_floor_set_root=empty_header.fee_floor_set_root,
-        anchor_reward_root=empty_header.anchor_reward_root,
+        shard_tree_state_root=genesis_header.shard_tree_state_root,
+        fee_floor_set_root=genesis_header.fee_floor_set_root,
+        anchor_reward_root=genesis_header.anchor_reward_root,
         timestamp_ms=0,
         nonce=0,
     )
@@ -219,8 +265,8 @@ def test_anchor_body_rejects_unsorted_duplicates_bad_roots_and_empty_nongenesis(
             header=bad_parent_header,
             covered_fruit_hashes=(),
             parent_candidate_hashes=(),
-            shard_tree_bytes=b"",
-            fee_floor_entries=(),
+            shard_tree_bytes=canonical_tree.serialize(),
+            fee_floor_entries=canonical_fees,
             genesis_commitment=bytes([1]) * HASH_LEN_BYTES,
         )
 

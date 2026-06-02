@@ -23,6 +23,7 @@ from tensorpow.crypto.hash import (
     domain_hash,
     hash_bytes,
 )
+from tensorpow.mempool.shard_tree import ROOT_SHARD_ID, ShardTree
 from tensorpow.pow.challenge import U16_MAX, U32_MAX, U64_MAX
 from tensorpow.tx.transaction import Output, TxDecodeError
 
@@ -30,6 +31,7 @@ MAX_FRUIT_PAYLOAD_BYTES: Final[int] = 8192
 MIN_FRUIT_TX_COUNT: Final[int] = 1
 PARENT_CANDIDATE_MAX_COUNT: Final[int] = 10_000
 SHARD_TREE_MAX_BYTES: Final[int] = 262_144
+_GENESIS_ROOT_FEE_FLOOR_MATOMS_PER_KB: Final[int] = 0
 
 
 class BlockDecodeError(ValueError):
@@ -146,6 +148,7 @@ class Anchor:
                 raise ValueError("genesis anchor must not carry parent candidates")
             if self.anchor_reward_outputs:
                 raise ValueError("genesis anchor must not carry reward outputs")
+            _validate_genesis_empty_state(self.shard_tree_bytes, self.fee_floor_entries)
         elif not self.covered_fruit_hashes:
             raise ValueError("non-genesis anchor must cover at least one fruit")
         if self.fruit_set_root() != self.header.fruit_set_root:
@@ -267,6 +270,17 @@ def anchor_reward_root(outputs: tuple[Output, ...]) -> bytes:
         DOMAIN_ANCHOR_REWARD_ROOT,
         tuple(output.to_bytes() for output in outputs),
     )
+
+
+def _validate_genesis_empty_state(
+    shard_tree_bytes: bytes,
+    fee_floor_entries: tuple[FeeFloorEntry, ...],
+) -> None:
+    canonical_tree = ShardTree()
+    if shard_tree_bytes != canonical_tree.serialize():
+        raise ValueError("genesis anchor must use canonical root shard tree")
+    if fee_floor_entries != (FeeFloorEntry(ROOT_SHARD_ID, _GENESIS_ROOT_FEE_FLOOR_MATOMS_PER_KB),):
+        raise ValueError("genesis anchor must use zero root-shard fee floor")
 
 
 def _decode_anchor_reward_output(data: bytes) -> Output:

@@ -51,12 +51,15 @@ def test_withheld_fruits_under_forty_percent_do_not_reorg_economic_depth() -> No
 
 
 def test_node_rejects_withheld_fruit_with_unknown_parent(tmp_path: Path) -> None:
+    genesis = genesis_anchor()
     node = TensorPowNode(
-        TensorPowConfig(data_dir=tmp_path / "selfish-node"),
+        TensorPowConfig(
+            data_dir=tmp_path / "selfish-node",
+            expected_genesis_hash=genesis.block_hash(),
+        ),
         pow_verifier=lambda _header, _target, _backend: True,
     )
     try:
-        genesis = genesis_anchor()
         honest = fruit(
             (coinbase_tx(31).to_bytes(),),
             nonce=31,

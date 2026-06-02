@@ -67,12 +67,15 @@ def test_malformed_shard_fork_partition_is_rejected() -> None:
 
 
 def test_node_rejects_malformed_shard_tree_anchor_after_split_fork(tmp_path: Path) -> None:
+    genesis = genesis_anchor()
     node = TensorPowNode(
-        TensorPowConfig(data_dir=tmp_path / "shard-fork-node"),
+        TensorPowConfig(
+            data_dir=tmp_path / "shard-fork-node",
+            expected_genesis_hash=genesis.block_hash(),
+        ),
         pow_verifier=lambda _header, _target, _backend: True,
     )
     try:
-        genesis = genesis_anchor()
         seed_fruit = fruit(
             (coinbase_tx(61).to_bytes(),),
             nonce=61,
