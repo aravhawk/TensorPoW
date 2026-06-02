@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import tensorpow.consensus.rewards as rewards_module
 import tensorpow.node.node as node_module
 from tensorpow.chain.blocks import (
     Anchor,
@@ -21,7 +22,11 @@ from tensorpow.chain.blocks import (
 from tensorpow.chain.headers import AnchorHeader, FruitHeader
 from tensorpow.consensus.anchor_daa import ANCHOR_INITIAL_TARGET_LE, AnchorRecord
 from tensorpow.consensus.ghostdag import DYNAMIC_K_MIN
-from tensorpow.consensus.rewards import interval_subsidy_matoms, reward_pools
+from tensorpow.consensus.rewards import (
+    coinbase_maturity_height,
+    interval_subsidy_matoms,
+    reward_pools,
+)
 from tensorpow.crypto.hash import HASH_LEN_BYTES, hash_bytes
 from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
 from tensorpow.genesis import GENESIS_CHAIN_ID_TESTNET, GenesisInputs, build_genesis_artifact
@@ -349,6 +354,102 @@ def test_duplicate_coinbase_outpoints_reject_deterministically(tmp_path: Path) -
     assert node.process_fruit(first)
     assert node.process_fruit(second)
     assert node.process_anchor(anchor).reason == "duplicate_coinbase_outpoint"
+    node.close()
+
+
+def test_coinbase_matures_at_covering_anchor_height(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rewards_module, "COINBASE_MATURITY_ANCHORS", 2)
+    node = _node(tmp_path / "node")
+    wallet = Wallet.recover("55" * 32)
+    funder = Wallet.recover("77" * 32)
+    recipient = Wallet.recover("66" * 32)
+    genesis = _genesis_anchor()
+    coinbase = Transaction.coinbase((Output(10_000, TEMPLATE_PKH, payload=wallet.pubkey_hash()),))
+
+    assert node.process_anchor(genesis)
+    parent_anchor = genesis.block_hash()
+    parent_fruit = GENESIS_PARENT_HASH
+    first_fruit = _fruit(
+        (coinbase.to_bytes(),),
+        latest_anchor=parent_anchor,
+        parent_selected=parent_fruit,
+        timestamp_ms=1_000,
+        nonce=41,
+    )
+    first_anchor = _anchor(
+        first_fruit.block_hash(),
+        parent_anchor=parent_anchor,
+        anchor_reward_outputs=(Output(10_000, TEMPLATE_PKH, payload=funder.pubkey_hash()),),
+        timestamp_ms=1_500,
+    )
+    assert node.process_fruit(first_fruit).accepted
+    assert node.process_anchor(first_anchor).accepted
+
+    coinbase_outpoint = Outpoint(coinbase.tx_id(), 0)
+    coinbase_utxo = node.utxo_set.get(coinbase_outpoint)
+    assert coinbase_utxo is not None
+    assert coinbase_utxo.lockheight == coinbase_maturity_height(1)
+
+    parent_anchor = first_anchor.block_hash()
+    parent_fruit = first_fruit.block_hash()
+    spend = wallet.create_signed_transaction(
+        utxos=(coinbase_utxo,),
+        recipient_address=recipient.address,
+        amount_matoms=9_000,
+        fee_matoms=1_000,
+    )
+    early_fruit = _fruit(
+        (_coinbase_tx(101).to_bytes(), spend.to_bytes()),
+        latest_anchor=parent_anchor,
+        parent_selected=parent_fruit,
+        timestamp_ms=2_000,
+        nonce=101,
+    )
+    assert node.process_fruit(early_fruit).reason == "script_failed"
+
+    funder_utxos = node.utxo_set.by_owner(funder.pubkey_hash())
+    assert len(funder_utxos) == 1
+    filler_spend = funder.create_signed_transaction(
+        utxos=funder_utxos,
+        recipient_address=recipient.address,
+        amount_matoms=9_000,
+        fee_matoms=1_000,
+    )
+    filler_fruit = _fruit(
+        (_coinbase_tx(102).to_bytes(), filler_spend.to_bytes()),
+        latest_anchor=parent_anchor,
+        parent_selected=parent_fruit,
+        timestamp_ms=3_000,
+        nonce=102,
+    )
+    filler_anchor = _anchor(
+        filler_fruit.block_hash(),
+        parent_anchor=parent_anchor,
+        timestamp_ms=3_500,
+    )
+    assert node.process_fruit(filler_fruit).accepted
+    assert node.process_anchor(filler_anchor).accepted
+    parent_anchor = filler_anchor.block_hash()
+    parent_fruit = filler_fruit.block_hash()
+
+    boundary_fruit = _fruit(
+        (_coinbase_tx(103).to_bytes(), spend.to_bytes()),
+        latest_anchor=parent_anchor,
+        parent_selected=parent_fruit,
+        timestamp_ms=4_000,
+        nonce=103,
+    )
+    boundary_anchor = _anchor(
+        boundary_fruit.block_hash(),
+        parent_anchor=parent_anchor,
+        timestamp_ms=4_500,
+    )
+    assert node.process_fruit(boundary_fruit).accepted
+    assert node.process_anchor(boundary_anchor).accepted
+    assert node.utxo_set.get(coinbase_outpoint) is None
     node.close()
 
 

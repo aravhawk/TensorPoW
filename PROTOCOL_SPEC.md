@@ -911,7 +911,11 @@ defined in section 6. Fruit miners claim the fruit pool plus realized tips
 through fruit coinbase transactions. Anchor miners claim at most the anchor pool
 through `anchor_reward_outputs`, which are committed by `anchor_reward_root` in
 the anchor header and use anchor-hash-derived outpoints. Coinbase outputs mature
-after `COINBASE_MATURITY_ANCHORS`.
+after `COINBASE_MATURITY_ANCHORS`. Transactions covered by an anchor are
+validated against that anchor's post-application height for lockheight and
+coinbase-maturity checks. Therefore a fruit coinbase output created in anchor
+height `H` is first spendable by a transaction covered in anchor height
+`H + COINBASE_MATURITY_ANCHORS`.
 
 ---
 

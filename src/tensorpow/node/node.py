@@ -357,6 +357,7 @@ class TensorPowNode:
                 return NodeResult.reject("fruit_pow_invalid")
 
             current_anchor_height = self._anchor_height()
+            covering_anchor_height = current_anchor_height + 1
             fee_floor = self._fee_floor_for_shard(fruit.header.shard_id)
             validation_view = UTXOSet(self.utxo_set.utxos())
             tip_sum = 0
@@ -368,7 +369,7 @@ class TensorPowNode:
                     required_shard_id=fruit.header.shard_id,
                     fee_floor_matoms_per_kb=fee_floor,
                     current_time_ms=fruit.header.timestamp_ms,
-                    current_height=current_anchor_height,
+                    current_height=covering_anchor_height,
                 )
                 if result is not None:
                     return NodeResult.reject(result)
@@ -382,7 +383,7 @@ class TensorPowNode:
             except ValueError:
                 return NodeResult.reject("coinbase_too_large")
             pre_anchor_subsidy_limit = interval_subsidy_matoms(
-                current_anchor_height + 1,
+                covering_anchor_height,
                 self._minted_supply(),
             )
             if coinbase_claim > pre_anchor_subsidy_limit + tip_sum:
@@ -691,14 +692,13 @@ class TensorPowNode:
             return "bad_fee_floor_entries"
 
         staged = UTXOSet(state.utxo_set.utxos())
-        parent_height = 0 if anchor_height == 0 else anchor_height - 1
         apply_result, _spent_outpoints, _created_utxos, effective_tips, confirmed_tx_ids = (
             self._apply_anchor_fruits(
                 anchor,
                 staged=staged,
                 shard_tree=state.shard_tree,
                 fee_floors=state.fee_floors,
-                current_anchor_height=parent_height,
+                validation_anchor_height=anchor_height,
             )
         )
         if apply_result is not None:
@@ -851,7 +851,7 @@ class TensorPowNode:
         staged: UTXOSet,
         shard_tree: ShardTree,
         fee_floors: Mapping[int, int],
-        current_anchor_height: int,
+        validation_anchor_height: int,
     ) -> tuple[
         str | None, tuple[Outpoint, ...], tuple[UTXO, ...], dict[bytes, int], tuple[bytes, ...]
     ]:
@@ -890,7 +890,7 @@ class TensorPowNode:
                     required_shard_id=fruit.header.shard_id,
                     fee_floor_matoms_per_kb=fee_floor,
                     current_time_ms=fruit.header.timestamp_ms,
-                    current_height=current_anchor_height,
+                    current_height=validation_anchor_height,
                 )
                 if result is not None:
                     return result, (), (), {}, ()
