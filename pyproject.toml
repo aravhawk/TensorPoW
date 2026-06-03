@@ -24,6 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "daytona>=0.183.0,<0.184.0",
     "mypy>=2.1.0,<3.0.0",
     "pre-commit>=4.6.0,<5.0.0",
     "pytest>=9.0.3,<10.0.0",

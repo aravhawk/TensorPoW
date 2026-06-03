@@ -1,0 +1,235 @@
+name: Approved PR CI
+
+on:
+  workflow_run:
+    workflows: ["PR Review Approved"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  prepare:
+    name: Validate PR approval
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.validate.outputs.should_run }}
+      pr_number: ${{ steps.validate.outputs.pr_number }}
+      head_sha: ${{ steps.validate.outputs.head_sha }}
+      head_repo: ${{ steps.validate.outputs.head_repo }}
+      head_ref: ${{ steps.validate.outputs.head_ref }}
+    steps:
+      - name: Checkout trusted scripts
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download approval artifact
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          path: approval-artifacts
+          github-token: ${{ github.token }}
+      - name: Validate approval
+        id: validate
+        env:
+          APPROVAL_ARTIFACT_DIR: approval-artifacts
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/validate_pr_approval.py
+      - name: Mark approved CI pending
+        if: ${{ steps.validate.outputs.should_run == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.validate.outputs.head_sha }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            -f state=pending \
+            -f context=approved-pr-ci \
+            -f description="Approved PR CI is running" \
+            -f target_url="${TARGET_URL}"
+
+  python:
+    name: Python checks
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout approved PR head
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.prepare.outputs.head_repo }}
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+      - name: Ruff check
+        run: ruff check .
+      - name: Ruff format
+        run: ruff format --check .
+      - name: Mypy
+        run: mypy src scripts
+      - name: Pytest
+        run: pytest tests
+
+  linux-x86-cpu:
+    name: Linux x86 CPU determinism
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout approved PR head
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.prepare.outputs.head_repo }}
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+      - name: Run determinism tests
+        env:
+          TENSORPOW_DETERMINISM_BACKEND: cpu
+        run: pytest -m determinism tests/determinism
+
+  linux-arm-cpu:
+    name: Linux ARM CPU determinism
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout approved PR head
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.prepare.outputs.head_repo }}
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+      - name: Run determinism tests
+        env:
+          TENSORPOW_DETERMINISM_BACKEND: cpu
+        run: pytest -m determinism tests/determinism
+
+  macos-arm-mps:
+    name: macOS ARM MPS determinism
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - name: Checkout approved PR head
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.prepare.outputs.head_repo }}
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install system packages
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y libgmp-dev
+          fi
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+      - name: Run determinism tests
+        env:
+          TENSORPOW_DETERMINISM_BACKEND: mps
+        run: pytest -m determinism tests/determinism
+
+  daytona-cuda:
+    name: Daytona RTX PRO 6000 CUDA determinism
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: approved-pr-daytona-cuda-${{ needs.prepare.outputs.pr_number }}
+      cancel-in-progress: true
+    env:
+      DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+      DAYTONA_TARGET: ${{ vars.DAYTONA_TARGET || 'us-east-1' }}
+      DAYTONA_GPU_SNAPSHOT: ${{ vars.DAYTONA_GPU_SNAPSHOT || 'tensorpow-rtx-pro-6000' }}
+    steps:
+      - name: Checkout trusted scripts
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install Daytona runner dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Run CUDA determinism in Daytona
+        run: |
+          python scripts/run_daytona_cuda_ci.py \
+            --repository "${{ needs.prepare.outputs.head_repo }}" \
+            --sha "${{ needs.prepare.outputs.head_sha }}"
+
+  publish-status:
+    name: Publish approved CI status
+    needs: [prepare, python, linux-x86-cpu, linux-arm-cpu, macos-arm-mps, daytona-cuda]
+    if: ${{ always() && needs.prepare.outputs.should_run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish combined status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PYTHON_RESULT: ${{ needs.python.result }}
+          X86_RESULT: ${{ needs.linux-x86-cpu.result }}
+          ARM_RESULT: ${{ needs.linux-arm-cpu.result }}
+          MPS_RESULT: ${{ needs.macos-arm-mps.result }}
+          CUDA_RESULT: ${{ needs.daytona-cuda.result }}
+        run: |
+          if [ "$PYTHON_RESULT" = success ] && \
+             [ "$X86_RESULT" = success ] && \
+             [ "$ARM_RESULT" = success ] && \
+             [ "$MPS_RESULT" = success ] && \
+             [ "$CUDA_RESULT" = success ]; then
+            state=success
+            description="Approved PR CI passed"
+          else
+            state=failure
+            description="Approved PR CI failed"
+          fi
+
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            -f state="$state" \
+            -f context=approved-pr-ci \
+            -f description="$description" \
+            -f target_url="${TARGET_URL}"
