@@ -79,7 +79,10 @@ jobs:
 
   linux-x86-cuda:
     name: Linux x86 CUDA
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.run_cuda) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_cuda }}
+    concurrency:
+      group: tensorpow-cuda-determinism
+      cancel-in-progress: true
     runs-on: [self-hosted, linux, x64, cuda, tensorpow-cuda]
     steps:
       - name: Checkout
