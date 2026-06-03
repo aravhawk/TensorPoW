@@ -10,10 +10,17 @@ import sys
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-from daytona import CreateSandboxFromSnapshotParams, Daytona, DaytonaConfig
+from daytona import (
+    CreateSandboxFromSnapshotParams,
+    CreateSnapshotParams,
+    Daytona,
+    DaytonaConfig,
+    Resources,
+)
 
 DEFAULT_REPOSITORY = "aravhawk/TensorPoW"
 DEFAULT_SNAPSHOT = "tensorpow-rtx-pro-6000"
+DEFAULT_SNAPSHOT_IMAGE = "python:3.12"
 DEFAULT_TARGET = "us-east-1"
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -49,6 +56,30 @@ class Sandbox(Protocol):
     def delete(self, timeout: float | None = 60) -> None: ...
 
 
+class SnapshotService(Protocol):
+    def get(self, name: str) -> object: ...
+
+    def create(
+        self,
+        params: CreateSnapshotParams,
+        *,
+        on_logs: object | None = None,
+        timeout: float | None = 0,
+    ) -> object: ...
+
+
+class DaytonaClient(Protocol):
+    snapshot: SnapshotService
+
+    def create(
+        self,
+        params: CreateSandboxFromSnapshotParams | None = None,
+        *,
+        timeout: float = 60,
+        on_snapshot_create_logs: object | None = None,
+    ) -> object: ...
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -75,6 +106,11 @@ def parse_args() -> argparse.Namespace:
         help="Daytona target/region.",
     )
     parser.add_argument(
+        "--snapshot-image",
+        default=os.environ.get("DAYTONA_GPU_SNAPSHOT_IMAGE", DEFAULT_SNAPSHOT_IMAGE),
+        help="Base image to use if the Daytona GPU snapshot must be created.",
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=int(os.environ.get("DAYTONA_CUDA_COMMAND_TIMEOUT", "1800")),
@@ -83,13 +119,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def validate_inputs(repository: str, sha: str, snapshot: str) -> None:
+def validate_inputs(repository: str, sha: str, snapshot: str, snapshot_image: str) -> None:
     if not REPOSITORY_RE.fullmatch(repository):
         raise ValueError(f"invalid repository: {repository!r}")
     if not SHA_RE.fullmatch(sha):
         raise ValueError("sha must be a 40-character hex commit")
     if not snapshot.strip():
         raise ValueError("DAYTONA_GPU_SNAPSHOT must not be empty")
+    if not snapshot_image.strip():
+        raise ValueError("DAYTONA_GPU_SNAPSHOT_IMAGE must not be empty")
     if not os.environ.get("DAYTONA_API_KEY"):
         raise ValueError("DAYTONA_API_KEY is required")
 
@@ -131,20 +169,39 @@ def assert_rtx_pro_6000(sandbox: Sandbox, *, timeout: int) -> None:
         )
 
 
+def ensure_gpu_snapshot(daytona: DaytonaClient, *, name: str, image: str) -> None:
+    try:
+        daytona.snapshot.get(name)
+    except Exception as exc:
+        if "not found" not in str(exc).lower():
+            raise
+        print(f"Daytona GPU snapshot {name!r} was not found; creating it from {image!r}.")
+        daytona.snapshot.create(
+            CreateSnapshotParams(
+                name=name,
+                image=image,
+                resources=Resources(gpu=1),
+            ),
+            timeout=0,
+        )
+
+
 def main() -> int:
     args = parse_args()
     repository = str(args.repository)
     sha = str(args.sha)
     snapshot = str(args.snapshot)
+    snapshot_image = str(args.snapshot_image)
     target = str(args.target)
     timeout = int(args.timeout)
 
-    validate_inputs(repository, sha, snapshot)
+    validate_inputs(repository, sha, snapshot, snapshot_image)
     config = DaytonaConfig(target=target)
-    daytona = Daytona(config)
+    daytona = cast(DaytonaClient, Daytona(config))
     sandbox: Sandbox | None = None
 
     try:
+        ensure_gpu_snapshot(daytona, name=snapshot, image=snapshot_image)
         sandbox = cast(
             Sandbox,
             daytona.create(
