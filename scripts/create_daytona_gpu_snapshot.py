@@ -18,7 +18,7 @@ DEFAULT_TEMPLATE = "daytona/snapshots/tensorpow-rtx-pro-6000.json"
 @dataclass(frozen=True)
 class SnapshotSpec:
     name: str
-    target: str
+    target: str | None
     image: str
     resources: Resources
 
@@ -79,7 +79,7 @@ def load_spec(path: Path, target_override: str | None) -> SnapshotSpec:
         raise ValueError("resources must be an object")
 
     name = require_string(payload, "name")
-    target = target_override or require_string(payload, "target")
+    target = target_override or optional_string(payload, "target")
     image = require_string(payload, "image")
     gpu = resources_payload.get("gpu")
     if gpu != 1:
@@ -102,6 +102,17 @@ def require_string(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{key} must be a non-empty string")
+    return value
+
+
+def optional_string(payload: dict[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} must be null or a non-empty string")
+    if value in {"auto", "default"}:
+        return None
     return value
 
 
@@ -152,7 +163,8 @@ def main() -> int:
         snapshot = daytona.snapshot.activate(snapshot)
         print(f"Activated Daytona snapshot {snapshot.name!r}; state={snapshot.state!r}")
 
-    print(f"Daytona GPU snapshot {snapshot.name!r} is configured for target {spec.target!r}.")
+    target_label = spec.target or "organization default"
+    print(f"Daytona GPU snapshot {snapshot.name!r} is configured for target {target_label!r}.")
     return 0
 
 

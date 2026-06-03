@@ -177,7 +177,6 @@ jobs:
       cancel-in-progress: true
     env:
       DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
-      DAYTONA_TARGET: ${{ vars.DAYTONA_TARGET || 'us-east-1' }}
       DAYTONA_GPU_SNAPSHOT: ${{ vars.DAYTONA_GPU_SNAPSHOT || 'tensorpow-rtx-pro-6000' }}
     steps:
       - name: Checkout trusted scripts

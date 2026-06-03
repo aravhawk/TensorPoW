@@ -1,6 +1,6 @@
 {
   "name": "tensorpow-rtx-pro-6000",
-  "target": "us-east-1",
+  "target": null,
   "image": "python:3.12",
   "resources": {
     "gpu": 1

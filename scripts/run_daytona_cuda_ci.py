@@ -21,7 +21,6 @@ from daytona import (
 DEFAULT_REPOSITORY = "aravhawk/TensorPoW"
 DEFAULT_SNAPSHOT = "tensorpow-rtx-pro-6000"
 DEFAULT_SNAPSHOT_IMAGE = "python:3.12"
-DEFAULT_TARGET = "us-east-1"
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
@@ -102,8 +101,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--target",
-        default=os.environ.get("DAYTONA_TARGET", DEFAULT_TARGET),
-        help="Daytona target/region.",
+        default=os.environ.get("DAYTONA_TARGET"),
+        help="Optional Daytona target/region. Defaults to the organization default.",
     )
     parser.add_argument(
         "--snapshot-image",
@@ -192,7 +191,7 @@ def main() -> int:
     sha = str(args.sha)
     snapshot = str(args.snapshot)
     snapshot_image = str(args.snapshot_image)
-    target = str(args.target)
+    target = str(args.target) if args.target else None
     timeout = int(args.timeout)
 
     validate_inputs(repository, sha, snapshot, snapshot_image)
@@ -219,8 +218,10 @@ def main() -> int:
                 timeout=180,
             ),
         )
+        target_label = target or "organization default"
         print(
-            f"Created Daytona sandbox {sandbox.id} from snapshot {snapshot!r} in target {target!r}"
+            f"Created Daytona sandbox {sandbox.id} "
+            f"from snapshot {snapshot!r} in target {target_label!r}"
         )
 
         clone_url = f"https://github.com/{repository}.git"
