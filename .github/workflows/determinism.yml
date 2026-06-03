@@ -87,7 +87,7 @@ jobs:
 
   linux-x86-cuda:
     name: Linux x86 CUDA (Daytona RTX PRO 6000)
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.run_cuda) }}
+    if: ${{ (github.event_name == 'push' && vars.DAYTONA_GPU_SNAPSHOT_READY == 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_cuda) }}
     concurrency:
       group: tensorpow-cuda-determinism
       cancel-in-progress: true

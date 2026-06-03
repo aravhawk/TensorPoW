@@ -1,0 +1,10 @@
+{
+  "name": "tensorpow-rtx-pro-6000",
+  "target": "us-east-1",
+  "image": "python:3.12",
+  "resources": {
+    "gpu": 1
+  },
+  "expected_device_tokens": ["rtx", "pro", "6000"],
+  "purpose": "TensorPoW CUDA determinism CI on Daytona RTX PRO 6000 GPU sandboxes"
+}
