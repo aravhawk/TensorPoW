@@ -89,8 +89,8 @@ jobs:
     name: Linux x86 CUDA (Daytona H100)
     if: ${{ (github.event_name == 'push' && vars.DAYTONA_GPU_SNAPSHOT_READY == 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_cuda) }}
     concurrency:
-      group: tensorpow-cuda-determinism
-      cancel-in-progress: true
+      group: tensorpow-daytona-gpu
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     env:
       DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}

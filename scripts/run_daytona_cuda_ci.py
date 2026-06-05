@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import sys
+import time
 from dataclasses import dataclass
 from typing import Protocol, cast
 
@@ -22,6 +23,8 @@ DEFAULT_REPOSITORY = "aravhawk/TensorPoW"
 DEFAULT_SNAPSHOT = "daytona-gpu"
 DEFAULT_SNAPSHOT_IMAGE = "python:3.12"
 DEFAULT_EXPECTED_DEVICE_TOKENS = "h100"
+DEFAULT_GPU_CREATE_ATTEMPTS = 30
+DEFAULT_GPU_CREATE_WAIT_SECONDS = 60
 SANDBOX_REPO_DIR = "/tmp/tensorpow"
 SANDBOX_PYTHON = f"{SANDBOX_REPO_DIR}/.venv/bin/python"
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -126,6 +129,28 @@ def parse_args() -> argparse.Namespace:
         default=int(os.environ.get("DAYTONA_CUDA_COMMAND_TIMEOUT", "1800")),
         help="Per-command timeout in seconds.",
     )
+    parser.add_argument(
+        "--gpu-create-attempts",
+        type=int,
+        default=int(
+            os.environ.get(
+                "DAYTONA_GPU_CREATE_ATTEMPTS",
+                str(DEFAULT_GPU_CREATE_ATTEMPTS),
+            )
+        ),
+        help="Sandbox creation attempts when Daytona reports GPU quota exhaustion.",
+    )
+    parser.add_argument(
+        "--gpu-create-wait-seconds",
+        type=int,
+        default=int(
+            os.environ.get(
+                "DAYTONA_GPU_CREATE_WAIT_SECONDS",
+                str(DEFAULT_GPU_CREATE_WAIT_SECONDS),
+            )
+        ),
+        help="Seconds to wait between GPU quota retry attempts.",
+    )
     return parser.parse_args()
 
 
@@ -150,6 +175,13 @@ def validate_inputs(
         raise ValueError("DAYTONA_API_KEY is required")
 
 
+def validate_retry_settings(attempts: int, wait_seconds: int) -> None:
+    if attempts < 1:
+        raise ValueError("DAYTONA_GPU_CREATE_ATTEMPTS must be at least 1")
+    if wait_seconds < 1:
+        raise ValueError("DAYTONA_GPU_CREATE_WAIT_SECONDS must be at least 1")
+
+
 def run(sandbox: Sandbox, command: str, *, cwd: str | None = None, timeout: int) -> CommandResult:
     print(f"\n$ {command}", flush=True)
     response = sandbox.process.exec(command, cwd=cwd, timeout=timeout)
@@ -164,6 +196,45 @@ def run(sandbox: Sandbox, command: str, *, cwd: str | None = None, timeout: int)
 
 def shell_join(*parts: str) -> str:
     return " ".join(shlex.quote(part) for part in parts)
+
+
+def is_gpu_quota_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    has_gpu_context = "gpu" in message or "graphics processing unit" in message
+    has_limit_context = (
+        "quota" in message
+        or "rate limit" in message
+        or "limit exceeded" in message
+        or "maximum allowed" in message
+        or "too many" in message
+        or "capacity" in message
+        or "insufficient" in message
+        or "not enough" in message
+    )
+    return has_gpu_context and has_limit_context
+
+
+def create_sandbox_with_quota_wait(
+    daytona: DaytonaClient,
+    params: CreateSandboxFromSnapshotParams,
+    *,
+    attempts: int,
+    wait_seconds: int,
+) -> Sandbox:
+    for attempt in range(1, attempts + 1):
+        try:
+            return cast(Sandbox, daytona.create(params, timeout=180))
+        except Exception as exc:
+            if not is_gpu_quota_error(exc) or attempt == attempts:
+                raise
+            print(
+                "Daytona GPU quota is currently unavailable; "
+                f"waiting {wait_seconds}s before retry {attempt + 1}/{attempts}.",
+                flush=True,
+            )
+            time.sleep(wait_seconds)
+
+    raise RuntimeError("unreachable GPU sandbox retry state")
 
 
 def parse_expected_device_tokens(value: str) -> tuple[str, ...]:
@@ -228,30 +299,32 @@ def main() -> int:
     expected_device_tokens = parse_expected_device_tokens(str(args.expected_device_tokens))
     target = str(args.target) if args.target else None
     timeout = int(args.timeout)
+    gpu_create_attempts = int(args.gpu_create_attempts)
+    gpu_create_wait_seconds = int(args.gpu_create_wait_seconds)
 
     validate_inputs(repository, sha, snapshot, snapshot_image, expected_device_tokens)
+    validate_retry_settings(gpu_create_attempts, gpu_create_wait_seconds)
     config = DaytonaConfig(target=target)
     daytona = cast(DaytonaClient, Daytona(config))
     sandbox: Sandbox | None = None
 
     try:
         ensure_gpu_snapshot(daytona, name=snapshot, image=snapshot_image)
-        sandbox = cast(
-            Sandbox,
-            daytona.create(
-                CreateSandboxFromSnapshotParams(
-                    snapshot=snapshot,
-                    language="python",
-                    ephemeral=True,
-                    auto_stop_interval=15,
-                    labels={
-                        "repo": repository.replace("/", "-"),
-                        "commit": sha,
-                        "purpose": "tensorpow-cuda-ci",
-                    },
-                ),
-                timeout=180,
+        sandbox = create_sandbox_with_quota_wait(
+            daytona,
+            CreateSandboxFromSnapshotParams(
+                snapshot=snapshot,
+                language="python",
+                ephemeral=True,
+                auto_stop_interval=15,
+                labels={
+                    "repo": repository.replace("/", "-"),
+                    "commit": sha,
+                    "purpose": "tensorpow-cuda-ci",
+                },
             ),
+            attempts=gpu_create_attempts,
+            wait_seconds=gpu_create_wait_seconds,
         )
         target_label = target or "organization default"
         print(

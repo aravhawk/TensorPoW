@@ -173,8 +173,8 @@ jobs:
     if: ${{ needs.prepare.outputs.should_run == 'true' }}
     runs-on: ubuntu-latest
     concurrency:
-      group: approved-pr-daytona-cuda-${{ needs.prepare.outputs.pr_number }}
-      cancel-in-progress: true
+      group: tensorpow-daytona-gpu
+      cancel-in-progress: false
     env:
       DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
       DAYTONA_TARGET: ${{ vars.DAYTONA_TARGET || 'us-east-1' }}
