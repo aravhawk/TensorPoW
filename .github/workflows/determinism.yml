@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       run_cuda:
-        description: "Run the Daytona RTX PRO 6000 CUDA determinism job"
+        description: "Run the Daytona H100 CUDA determinism job"
         required: false
         default: true
         type: boolean
@@ -86,7 +86,7 @@ jobs:
         run: pytest -m determinism tests/determinism
 
   linux-x86-cuda:
-    name: Linux x86 CUDA (Daytona RTX PRO 6000)
+    name: Linux x86 CUDA (Daytona H100)
     if: ${{ (github.event_name == 'push' && vars.DAYTONA_GPU_SNAPSHOT_READY == 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_cuda) }}
     concurrency:
       group: tensorpow-cuda-determinism
@@ -94,7 +94,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
-      DAYTONA_GPU_SNAPSHOT: ${{ vars.DAYTONA_GPU_SNAPSHOT || 'tensorpow-rtx-pro-6000' }}
+      DAYTONA_TARGET: ${{ vars.DAYTONA_TARGET || 'us-east-1' }}
+      DAYTONA_GPU_SNAPSHOT: ${{ vars.DAYTONA_GPU_SNAPSHOT || 'daytona-gpu' }}
+      DAYTONA_GPU_EXPECTED_DEVICE_TOKENS: ${{ vars.DAYTONA_GPU_EXPECTED_DEVICE_TOKENS || 'h100' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -1,4 +1,4 @@
-name: Daytona Snapshot Setup
+name: Daytona GPU Profile Check
 
 on:
   workflow_dispatch:
@@ -8,10 +8,11 @@ permissions:
 
 jobs:
   setup:
-    name: Create Daytona GPU snapshot
+    name: Verify Daytona GPU profile
     runs-on: ubuntu-latest
     env:
       DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+      DAYTONA_TARGET: ${{ vars.DAYTONA_TARGET || 'us-east-1' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,5 +25,5 @@ jobs:
           cache: "pip"
       - name: Install Daytona setup dependencies
         run: python -m pip install -e ".[dev]"
-      - name: Create or verify Daytona GPU snapshot
-        run: python scripts/create_daytona_gpu_snapshot.py --activate
+      - name: Verify Daytona GPU snapshot
+        run: python scripts/create_daytona_gpu_snapshot.py --no-create

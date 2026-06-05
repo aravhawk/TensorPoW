@@ -12,7 +12,7 @@ from typing import Any, Protocol, cast
 
 from daytona import CreateSnapshotParams, Daytona, DaytonaConfig, Resources
 
-DEFAULT_TEMPLATE = "daytona/snapshots/tensorpow-rtx-pro-6000.json"
+DEFAULT_TEMPLATE = "daytona/snapshots/tensorpow-h100.json"
 
 
 @dataclass(frozen=True)

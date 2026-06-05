@@ -19,8 +19,11 @@ from daytona import (
 )
 
 DEFAULT_REPOSITORY = "aravhawk/TensorPoW"
-DEFAULT_SNAPSHOT = "tensorpow-rtx-pro-6000"
+DEFAULT_SNAPSHOT = "daytona-gpu"
 DEFAULT_SNAPSHOT_IMAGE = "python:3.12"
+DEFAULT_EXPECTED_DEVICE_TOKENS = "h100"
+SANDBOX_REPO_DIR = "/tmp/tensorpow"
+SANDBOX_PYTHON = f"{SANDBOX_REPO_DIR}/.venv/bin/python"
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
@@ -110,6 +113,14 @@ def parse_args() -> argparse.Namespace:
         help="Base image to use if the Daytona GPU snapshot must be created.",
     )
     parser.add_argument(
+        "--expected-device-tokens",
+        default=os.environ.get(
+            "DAYTONA_GPU_EXPECTED_DEVICE_TOKENS",
+            DEFAULT_EXPECTED_DEVICE_TOKENS,
+        ),
+        help="Comma- or space-separated tokens that must appear in the CUDA device name.",
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=int(os.environ.get("DAYTONA_CUDA_COMMAND_TIMEOUT", "1800")),
@@ -118,7 +129,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def validate_inputs(repository: str, sha: str, snapshot: str, snapshot_image: str) -> None:
+def validate_inputs(
+    repository: str,
+    sha: str,
+    snapshot: str,
+    snapshot_image: str,
+    expected_device_tokens: tuple[str, ...],
+) -> None:
     if not REPOSITORY_RE.fullmatch(repository):
         raise ValueError(f"invalid repository: {repository!r}")
     if not SHA_RE.fullmatch(sha):
@@ -127,6 +144,8 @@ def validate_inputs(repository: str, sha: str, snapshot: str, snapshot_image: st
         raise ValueError("DAYTONA_GPU_SNAPSHOT must not be empty")
     if not snapshot_image.strip():
         raise ValueError("DAYTONA_GPU_SNAPSHOT_IMAGE must not be empty")
+    if not expected_device_tokens:
+        raise ValueError("DAYTONA_GPU_EXPECTED_DEVICE_TOKENS must not be empty")
     if not os.environ.get("DAYTONA_API_KEY"):
         raise ValueError("DAYTONA_API_KEY is required")
 
@@ -147,23 +166,33 @@ def shell_join(*parts: str) -> str:
     return " ".join(shlex.quote(part) for part in parts)
 
 
-def assert_rtx_pro_6000(sandbox: Sandbox, *, timeout: int) -> None:
+def parse_expected_device_tokens(value: str) -> tuple[str, ...]:
+    tokens = tuple(token for token in re.split(r"[\s,]+", value.lower().strip()) if token)
+    return tokens
+
+
+def assert_expected_gpu(
+    sandbox: Sandbox,
+    *,
+    expected_device_tokens: tuple[str, ...],
+    timeout: int,
+) -> None:
     run(sandbox, "nvidia-smi", timeout=timeout)
     result = run(
         sandbox,
-        "python - <<'PY'\n"
+        f"{shlex.quote(SANDBOX_PYTHON)} - <<'PY'\n"
         "import torch\n"
         "assert torch.cuda.is_available(), 'CUDA is not available to PyTorch'\n"
         "print(torch.cuda.get_device_name(0))\n"
         "PY",
-        cwd="/workspace/tensorpow",
+        cwd=SANDBOX_REPO_DIR,
         timeout=timeout,
     )
     device_name = result.output.strip().splitlines()[-1].lower()
-    missing = [token for token in ("rtx", "pro", "6000") if token not in device_name]
+    missing = [token for token in expected_device_tokens if token not in device_name]
     if missing:
         raise RuntimeError(
-            "Daytona GPU device is not RTX PRO 6000: "
+            "Daytona GPU device does not match expected GPU: "
             f"{device_name!r} is missing {', '.join(missing)}"
         )
 
@@ -174,6 +203,11 @@ def ensure_gpu_snapshot(daytona: DaytonaClient, *, name: str, image: str) -> Non
     except Exception as exc:
         if "not found" not in str(exc).lower():
             raise
+        if name == DEFAULT_SNAPSHOT:
+            raise RuntimeError(
+                f"Daytona GPU snapshot {name!r} was not found. "
+                "Daytona docs expect this prebuilt GPU snapshot in us-east-1."
+            ) from exc
         print(f"Daytona GPU snapshot {name!r} was not found; creating it from {image!r}.")
         daytona.snapshot.create(
             CreateSnapshotParams(
@@ -191,10 +225,11 @@ def main() -> int:
     sha = str(args.sha)
     snapshot = str(args.snapshot)
     snapshot_image = str(args.snapshot_image)
+    expected_device_tokens = parse_expected_device_tokens(str(args.expected_device_tokens))
     target = str(args.target) if args.target else None
     timeout = int(args.timeout)
 
-    validate_inputs(repository, sha, snapshot, snapshot_image)
+    validate_inputs(repository, sha, snapshot, snapshot_image, expected_device_tokens)
     config = DaytonaConfig(target=target)
     daytona = cast(DaytonaClient, Daytona(config))
     sandbox: Sandbox | None = None
@@ -225,7 +260,6 @@ def main() -> int:
         )
 
         clone_url = f"https://github.com/{repository}.git"
-        run(sandbox, "mkdir -p /workspace", timeout=timeout)
         run(
             sandbox,
             shell_join(
@@ -234,20 +268,20 @@ def main() -> int:
                 "--no-tags",
                 "--filter=blob:none",
                 clone_url,
-                "/workspace/tensorpow",
+                SANDBOX_REPO_DIR,
             ),
             timeout=timeout,
         )
         run(
             sandbox,
             shell_join("git", "fetch", "--no-tags", "--depth", "1", "origin", sha),
-            cwd="/workspace/tensorpow",
+            cwd=SANDBOX_REPO_DIR,
             timeout=timeout,
         )
         run(
             sandbox,
             shell_join("git", "checkout", "--detach", sha),
-            cwd="/workspace/tensorpow",
+            cwd=SANDBOX_REPO_DIR,
             timeout=timeout,
         )
         run(
@@ -259,15 +293,21 @@ def main() -> int:
         )
         run(
             sandbox,
-            'python -m pip install -e ".[dev]"',
-            cwd="/workspace/tensorpow",
+            "if ! command -v uv >/dev/null 2>&1; then "
+            "curl -LsSf https://astral.sh/uv/install.sh | sh; "
+            "fi; "
+            'UV_BIN="$(command -v uv || printf %s "$HOME/.local/bin/uv")"; '
+            '"$UV_BIN" venv --python 3.12 .venv; '
+            f'"$UV_BIN" pip install --python {shlex.quote(SANDBOX_PYTHON)} -e ".[dev]"',
+            cwd=SANDBOX_REPO_DIR,
             timeout=timeout,
         )
-        assert_rtx_pro_6000(sandbox, timeout=timeout)
+        assert_expected_gpu(sandbox, expected_device_tokens=expected_device_tokens, timeout=timeout)
         run(
             sandbox,
-            "TENSORPOW_DETERMINISM_BACKEND=cuda pytest -m determinism tests/determinism",
-            cwd="/workspace/tensorpow",
+            f"TENSORPOW_DETERMINISM_BACKEND=cuda {shlex.quote(SANDBOX_PYTHON)} "
+            "-m pytest -m determinism tests/determinism",
+            cwd=SANDBOX_REPO_DIR,
             timeout=timeout,
         )
         return 0

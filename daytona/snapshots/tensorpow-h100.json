@@ -1,0 +1,10 @@
+{
+  "name": "daytona-gpu",
+  "target": "us-east-1",
+  "image": "daytona-gpu",
+  "resources": {
+    "gpu": 1
+  },
+  "expected_device_tokens": ["h100"],
+  "purpose": "TensorPoW CUDA determinism CI on Daytona's documented GPU sandbox profile"
+}
