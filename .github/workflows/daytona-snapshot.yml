@@ -24,6 +24,6 @@ jobs:
           python-version: "3.12"
           cache: "pip"
       - name: Install Daytona setup dependencies
-        run: python -m pip install -e ".[dev]"
+        run: python -m pip install "daytona>=0.183.0,<0.184.0"
       - name: Verify Daytona GPU snapshot
         run: python scripts/create_daytona_gpu_snapshot.py --no-create
