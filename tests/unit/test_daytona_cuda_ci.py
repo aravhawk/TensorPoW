@@ -88,6 +88,16 @@ def test_create_timeout_outlasts_gpu_queue_timeout() -> None:
     assert daytona.create_timeouts == [10 * 60 + ci.SANDBOX_START_TIMEOUT_SECONDS]
 
 
+def test_create_timeout_covers_gpu_queue_without_server_queue_timeout() -> None:
+    daytona = FakeDaytona()
+    params = CreateSandboxFromSnapshotParams(snapshot="daytona-gpu")
+
+    ci.create_sandbox_with_quota_wait(daytona, params, attempts=1, wait_seconds=1)
+
+    expected = ci.DEFAULT_GPU_QUEUE_WAIT_MINUTES * 60 + ci.SANDBOX_START_TIMEOUT_SECONDS
+    assert daytona.create_timeouts == [expected]
+
+
 def test_gpu_quota_errors_are_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ci.time, "sleep", lambda _: None)
     daytona = FakeDaytona([DaytonaBadRequestError("GPU quota exceeded", status_code=400)])

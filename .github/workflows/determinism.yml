@@ -96,6 +96,7 @@ jobs:
       DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
       DAYTONA_GPU_SNAPSHOT: ${{ vars.DAYTONA_GPU_SNAPSHOT || 'daytona-gpu' }}
       DAYTONA_GPU_EXPECTED_DEVICE_TOKENS: ${{ vars.DAYTONA_GPU_EXPECTED_DEVICE_TOKENS || 'h100' }}
+      DAYTONA_GPU_QUEUE_TIMEOUT_MINUTES: ${{ vars.DAYTONA_GPU_QUEUE_TIMEOUT_MINUTES }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7

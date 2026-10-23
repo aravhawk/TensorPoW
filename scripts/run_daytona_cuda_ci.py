@@ -27,7 +27,7 @@ DEFAULT_SNAPSHOT_IMAGE = "python:3.12"
 DEFAULT_EXPECTED_DEVICE_TOKENS = "h100"
 DEFAULT_GPU_CREATE_ATTEMPTS = 30
 DEFAULT_GPU_CREATE_WAIT_SECONDS = 60
-DEFAULT_GPU_QUEUE_TIMEOUT_MINUTES = 30
+DEFAULT_GPU_QUEUE_WAIT_MINUTES = 30
 SANDBOX_START_TIMEOUT_SECONDS = 300
 SANDBOX_REPO_DIR = "/tmp/tensorpow"
 SANDBOX_PYTHON = f"{SANDBOX_REPO_DIR}/.venv/bin/python"
@@ -158,16 +158,15 @@ def parse_args() -> argparse.Namespace:
         ),
         help="Seconds to wait between GPU quota retry attempts.",
     )
+    queue_timeout_env = os.environ.get("DAYTONA_GPU_QUEUE_TIMEOUT_MINUTES")
     parser.add_argument(
         "--gpu-queue-timeout-minutes",
         type=int,
-        default=int(
-            os.environ.get(
-                "DAYTONA_GPU_QUEUE_TIMEOUT_MINUTES",
-                str(DEFAULT_GPU_QUEUE_TIMEOUT_MINUTES),
-            )
+        default=int(queue_timeout_env) if queue_timeout_env else None,
+        help=(
+            "Minutes Daytona may queue the sandbox for GPU capacity before cancelling it. "
+            "Requires Daytona's queue timeout feature for the organization."
         ),
-        help="Minutes Daytona may queue the sandbox while waiting for GPU capacity.",
     )
     return parser.parse_args()
 
@@ -193,12 +192,14 @@ def validate_inputs(
         raise ValueError("DAYTONA_API_KEY is required")
 
 
-def validate_retry_settings(attempts: int, wait_seconds: int, queue_timeout_minutes: int) -> None:
+def validate_retry_settings(
+    attempts: int, wait_seconds: int, queue_timeout_minutes: int | None
+) -> None:
     if attempts < 1:
         raise ValueError("DAYTONA_GPU_CREATE_ATTEMPTS must be at least 1")
     if wait_seconds < 1:
         raise ValueError("DAYTONA_GPU_CREATE_WAIT_SECONDS must be at least 1")
-    if queue_timeout_minutes < 1:
+    if queue_timeout_minutes is not None and queue_timeout_minutes < 1:
         raise ValueError("DAYTONA_GPU_QUEUE_TIMEOUT_MINUTES must be at least 1")
 
 
@@ -244,9 +245,9 @@ def create_sandbox_with_quota_wait(
     wait_seconds: int,
 ) -> Sandbox:
     # On-demand GPU sandboxes queue server-side until capacity frees up, so the
-    # client timeout must outlast the queue timeout plus sandbox startup.
-    queue_timeout_minutes = params.queue_timeout or DEFAULT_GPU_QUEUE_TIMEOUT_MINUTES
-    create_timeout = queue_timeout_minutes * 60 + SANDBOX_START_TIMEOUT_SECONDS
+    # client timeout must outlast the queue wait plus sandbox startup.
+    queue_wait_minutes = params.queue_timeout or DEFAULT_GPU_QUEUE_WAIT_MINUTES
+    create_timeout = queue_wait_minutes * 60 + SANDBOX_START_TIMEOUT_SECONDS
     for attempt in range(1, attempts + 1):
         try:
             return cast(Sandbox, daytona.create(params, timeout=create_timeout))
@@ -325,7 +326,9 @@ def main() -> int:
     timeout = int(args.timeout)
     gpu_create_attempts = int(args.gpu_create_attempts)
     gpu_create_wait_seconds = int(args.gpu_create_wait_seconds)
-    gpu_queue_timeout_minutes = int(args.gpu_queue_timeout_minutes)
+    gpu_queue_timeout_minutes = (
+        int(args.gpu_queue_timeout_minutes) if args.gpu_queue_timeout_minutes else None
+    )
 
     validate_inputs(repository, sha, snapshot, snapshot_image, expected_device_tokens)
     validate_retry_settings(gpu_create_attempts, gpu_create_wait_seconds, gpu_queue_timeout_minutes)
