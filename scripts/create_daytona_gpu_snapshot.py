@@ -10,7 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from daytona import CreateSnapshotParams, Daytona, DaytonaConfig, Resources
+from daytona import (
+    CreateSnapshotParams,
+    Daytona,
+    DaytonaConfig,
+    DaytonaNotFoundError,
+    Resources,
+)
 
 DEFAULT_TEMPLATE = "daytona/snapshots/tensorpow-h100.json"
 
@@ -40,7 +46,7 @@ class SnapshotService(Protocol):
         timeout: float | None = 0,
     ) -> Snapshot: ...
 
-    def activate(self, snapshot: Snapshot) -> Snapshot: ...
+    def activate(self, snapshot: Snapshot | str) -> Snapshot: ...
 
 
 class DaytonaClient(Protocol):
@@ -133,9 +139,7 @@ def ensure_snapshot(daytona: DaytonaClient, spec: SnapshotSpec, *, create: bool)
             f"state={snapshot.state!r}, image={snapshot.image_name!r}"
         )
         return snapshot
-    except Exception as exc:
-        if "not found" not in str(exc).lower():
-            raise
+    except DaytonaNotFoundError as exc:
         if not create:
             raise RuntimeError(f"Daytona snapshot {spec.name!r} does not exist") from exc
 

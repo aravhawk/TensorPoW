@@ -1,6 +1,6 @@
 {
   "name": "daytona-gpu",
-  "target": "us-east-1",
+  "target": null,
   "image": "daytona-gpu",
   "resources": {
     "gpu": 1

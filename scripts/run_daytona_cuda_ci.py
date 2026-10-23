@@ -16,6 +16,8 @@ from daytona import (
     CreateSnapshotParams,
     Daytona,
     DaytonaConfig,
+    DaytonaError,
+    DaytonaNotFoundError,
     Resources,
 )
 
@@ -25,6 +27,8 @@ DEFAULT_SNAPSHOT_IMAGE = "python:3.12"
 DEFAULT_EXPECTED_DEVICE_TOKENS = "h100"
 DEFAULT_GPU_CREATE_ATTEMPTS = 30
 DEFAULT_GPU_CREATE_WAIT_SECONDS = 60
+DEFAULT_GPU_QUEUE_WAIT_MINUTES = 30
+SANDBOX_START_TIMEOUT_SECONDS = 300
 SANDBOX_REPO_DIR = "/tmp/tensorpow"
 SANDBOX_PYTHON = f"{SANDBOX_REPO_DIR}/.venv/bin/python"
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -58,7 +62,7 @@ class Sandbox(Protocol):
     @property
     def process(self) -> SandboxProcess: ...
 
-    def delete(self, timeout: float | None = 60) -> None: ...
+    def delete(self, timeout: float | None = 60, wait: bool = False) -> None: ...
 
 
 class SnapshotService(Protocol):
@@ -108,7 +112,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target",
         default=os.environ.get("DAYTONA_TARGET"),
-        help="Optional Daytona target/region. Defaults to the organization default.",
+        help=(
+            "Optional Daytona target/region. Leave unset for shared GPU sandboxes, "
+            "which Daytona schedules in its global 'earth' region."
+        ),
     )
     parser.add_argument(
         "--snapshot-image",
@@ -151,6 +158,16 @@ def parse_args() -> argparse.Namespace:
         ),
         help="Seconds to wait between GPU quota retry attempts.",
     )
+    queue_timeout_env = os.environ.get("DAYTONA_GPU_QUEUE_TIMEOUT_MINUTES")
+    parser.add_argument(
+        "--gpu-queue-timeout-minutes",
+        type=int,
+        default=int(queue_timeout_env) if queue_timeout_env else None,
+        help=(
+            "Minutes Daytona may queue the sandbox for GPU capacity before cancelling it. "
+            "Requires Daytona's queue timeout feature for the organization."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -175,11 +192,15 @@ def validate_inputs(
         raise ValueError("DAYTONA_API_KEY is required")
 
 
-def validate_retry_settings(attempts: int, wait_seconds: int) -> None:
+def validate_retry_settings(
+    attempts: int, wait_seconds: int, queue_timeout_minutes: int | None
+) -> None:
     if attempts < 1:
         raise ValueError("DAYTONA_GPU_CREATE_ATTEMPTS must be at least 1")
     if wait_seconds < 1:
         raise ValueError("DAYTONA_GPU_CREATE_WAIT_SECONDS must be at least 1")
+    if queue_timeout_minutes is not None and queue_timeout_minutes < 1:
+        raise ValueError("DAYTONA_GPU_QUEUE_TIMEOUT_MINUTES must be at least 1")
 
 
 def run(sandbox: Sandbox, command: str, *, cwd: str | None = None, timeout: int) -> CommandResult:
@@ -199,6 +220,8 @@ def shell_join(*parts: str) -> str:
 
 
 def is_gpu_quota_error(exc: Exception) -> bool:
+    if not isinstance(exc, DaytonaError):
+        return False
     message = str(exc).lower()
     has_gpu_context = "gpu" in message or "graphics processing unit" in message
     has_limit_context = (
@@ -221,9 +244,13 @@ def create_sandbox_with_quota_wait(
     attempts: int,
     wait_seconds: int,
 ) -> Sandbox:
+    # On-demand GPU sandboxes queue server-side until capacity frees up, so the
+    # client timeout must outlast the queue wait plus sandbox startup.
+    queue_wait_minutes = params.queue_timeout or DEFAULT_GPU_QUEUE_WAIT_MINUTES
+    create_timeout = queue_wait_minutes * 60 + SANDBOX_START_TIMEOUT_SECONDS
     for attempt in range(1, attempts + 1):
         try:
-            return cast(Sandbox, daytona.create(params, timeout=180))
+            return cast(Sandbox, daytona.create(params, timeout=create_timeout))
         except Exception as exc:
             if not is_gpu_quota_error(exc) or attempt == attempts:
                 raise
@@ -271,13 +298,11 @@ def assert_expected_gpu(
 def ensure_gpu_snapshot(daytona: DaytonaClient, *, name: str, image: str) -> None:
     try:
         daytona.snapshot.get(name)
-    except Exception as exc:
-        if "not found" not in str(exc).lower():
-            raise
+    except DaytonaNotFoundError as exc:
         if name == DEFAULT_SNAPSHOT:
             raise RuntimeError(
                 f"Daytona GPU snapshot {name!r} was not found. "
-                "Daytona docs expect this prebuilt GPU snapshot in us-east-1."
+                "Daytona provides this prebuilt GPU snapshot in its shared 'earth' region."
             ) from exc
         print(f"Daytona GPU snapshot {name!r} was not found; creating it from {image!r}.")
         daytona.snapshot.create(
@@ -301,9 +326,12 @@ def main() -> int:
     timeout = int(args.timeout)
     gpu_create_attempts = int(args.gpu_create_attempts)
     gpu_create_wait_seconds = int(args.gpu_create_wait_seconds)
+    gpu_queue_timeout_minutes = (
+        int(args.gpu_queue_timeout_minutes) if args.gpu_queue_timeout_minutes else None
+    )
 
     validate_inputs(repository, sha, snapshot, snapshot_image, expected_device_tokens)
-    validate_retry_settings(gpu_create_attempts, gpu_create_wait_seconds)
+    validate_retry_settings(gpu_create_attempts, gpu_create_wait_seconds, gpu_queue_timeout_minutes)
     config = DaytonaConfig(target=target)
     daytona = cast(DaytonaClient, Daytona(config))
     sandbox: Sandbox | None = None
@@ -317,6 +345,7 @@ def main() -> int:
                 language="python",
                 ephemeral=True,
                 auto_stop_interval=15,
+                queue_timeout=gpu_queue_timeout_minutes,
                 labels={
                     "repo": repository.replace("/", "-"),
                     "commit": sha,
@@ -387,7 +416,7 @@ def main() -> int:
     finally:
         if sandbox is not None:
             print(f"Deleting Daytona sandbox {sandbox.id}")
-            sandbox.delete(timeout=120)
+            sandbox.delete(timeout=120, wait=True)
 
 
 if __name__ == "__main__":

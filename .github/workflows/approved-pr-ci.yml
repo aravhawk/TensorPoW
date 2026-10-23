@@ -24,11 +24,11 @@ jobs:
       head_ref: ${{ steps.validate.outputs.head_ref }}
     steps:
       - name: Checkout trusted scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Download approval artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           run-id: ${{ github.event.workflow_run.id }}
@@ -68,10 +68,10 @@ jobs:
           ref: ${{ needs.prepare.outputs.head_sha }}
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
+          # No dependency cache: PR code runs here and could poison main's cache.
           python-version: "3.12"
-          cache: "pip"
       - name: Install system packages
         run: sudo apt-get update && sudo apt-get install -y libgmp-dev
       - name: Install package
@@ -98,10 +98,10 @@ jobs:
           ref: ${{ needs.prepare.outputs.head_sha }}
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
+          # No dependency cache: PR code runs here and could poison main's cache.
           python-version: "3.12"
-          cache: "pip"
       - name: Install system packages
         run: sudo apt-get update && sudo apt-get install -y libgmp-dev
       - name: Install package
@@ -124,10 +124,10 @@ jobs:
           ref: ${{ needs.prepare.outputs.head_sha }}
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
+          # No dependency cache: PR code runs here and could poison main's cache.
           python-version: "3.12"
-          cache: "pip"
       - name: Install system packages
         run: sudo apt-get update && sudo apt-get install -y libgmp-dev
       - name: Install package
@@ -150,10 +150,10 @@ jobs:
           ref: ${{ needs.prepare.outputs.head_sha }}
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
+          # No dependency cache: PR code runs here and could poison main's cache.
           python-version: "3.12"
-          cache: "pip"
       - name: Install system packages
         run: |
           if command -v apt-get >/dev/null 2>&1; then
@@ -177,21 +177,21 @@ jobs:
       cancel-in-progress: false
     env:
       DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
-      DAYTONA_TARGET: ${{ vars.DAYTONA_TARGET || 'us-east-1' }}
       DAYTONA_GPU_SNAPSHOT: ${{ vars.DAYTONA_GPU_SNAPSHOT || 'daytona-gpu' }}
       DAYTONA_GPU_EXPECTED_DEVICE_TOKENS: ${{ vars.DAYTONA_GPU_EXPECTED_DEVICE_TOKENS || 'h100' }}
+      DAYTONA_GPU_QUEUE_TIMEOUT_MINUTES: ${{ vars.DAYTONA_GPU_QUEUE_TIMEOUT_MINUTES }}
     steps:
       - name: Checkout trusted scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: "pip"
       - name: Install Daytona runner dependencies
-        run: python -m pip install "daytona>=0.183.0,<0.184.0"
+        run: python -m pip install "daytona>=0.226.0,<0.227.0"
       - name: Run CUDA determinism in Daytona
         run: |
           python scripts/run_daytona_cuda_ci.py \
