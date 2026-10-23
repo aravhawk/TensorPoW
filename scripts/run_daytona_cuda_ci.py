@@ -108,7 +108,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target",
         default=os.environ.get("DAYTONA_TARGET"),
-        help="Optional Daytona target/region. Defaults to the organization default.",
+        help=(
+            "Optional Daytona target/region. Leave unset for shared GPU sandboxes, "
+            "which Daytona schedules in its global 'earth' region."
+        ),
     )
     parser.add_argument(
         "--snapshot-image",
@@ -277,7 +280,7 @@ def ensure_gpu_snapshot(daytona: DaytonaClient, *, name: str, image: str) -> Non
         if name == DEFAULT_SNAPSHOT:
             raise RuntimeError(
                 f"Daytona GPU snapshot {name!r} was not found. "
-                "Daytona docs expect this prebuilt GPU snapshot in us-east-1."
+                "Daytona provides this prebuilt GPU snapshot in its shared 'earth' region."
             ) from exc
         print(f"Daytona GPU snapshot {name!r} was not found; creating it from {image!r}.")
         daytona.snapshot.create(

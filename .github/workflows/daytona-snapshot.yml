@@ -12,7 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
-      DAYTONA_TARGET: ${{ vars.DAYTONA_TARGET || 'us-east-1' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
