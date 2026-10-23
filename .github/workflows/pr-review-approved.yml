@@ -39,7 +39,7 @@ jobs:
               head_ref: $head_ref
             }' > approval/approval.json
       - name: Upload approval metadata
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: approved-pr-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
           path: approval/approval.json
