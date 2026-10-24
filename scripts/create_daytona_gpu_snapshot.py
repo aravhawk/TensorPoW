@@ -19,6 +19,7 @@ from daytona import (
 )
 
 DEFAULT_TEMPLATE = "daytona/snapshots/tensorpow-h100.json"
+DAYTONA_MANAGED_GPU_SNAPSHOT = "daytona-gpu"
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,11 @@ def ensure_snapshot(daytona: DaytonaClient, spec: SnapshotSpec, *, create: bool)
     except DaytonaNotFoundError as exc:
         if not create:
             raise RuntimeError(f"Daytona snapshot {spec.name!r} does not exist") from exc
+        if spec.name == DAYTONA_MANAGED_GPU_SNAPSHOT:
+            raise RuntimeError(
+                f"Daytona GPU snapshot {spec.name!r} is managed by Daytona and cannot be "
+                "created here; check that GPU sandboxes are enabled for the organization."
+            ) from exc
 
     print(f"Creating Daytona GPU snapshot {spec.name!r} from image {spec.image!r}.")
     return daytona.snapshot.create(

@@ -88,8 +88,9 @@ jobs:
   linux-x86-cuda:
     name: Linux x86 CUDA (Daytona H100)
     if: ${{ (github.event_name == 'push' && vars.DAYTONA_GPU_SNAPSHOT_READY == 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_cuda) }}
+    # Never cancel a running GPU job; a newer pending run replaces an older one.
     concurrency:
-      group: tensorpow-daytona-gpu
+      group: tensorpow-daytona-gpu-determinism
       cancel-in-progress: false
     runs-on: ubuntu-latest
     env:
@@ -110,4 +111,9 @@ jobs:
       - name: Install Daytona runner dependencies
         run: python -m pip install "daytona>=0.226.0,<0.227.0"
       - name: Run CUDA determinism in Daytona
-        run: python scripts/run_daytona_cuda_ci.py
+        id: cuda
+        # exec so Python is the step's entry process and receives the cancel SIGINT.
+        run: exec python scripts/run_daytona_cuda_ci.py
+      - name: Clean up Daytona sandboxes
+        if: ${{ always() && steps.cuda.outcome != 'skipped' }}
+        run: python scripts/run_daytona_cuda_ci.py --cleanup

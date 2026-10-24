@@ -172,9 +172,12 @@ jobs:
     needs: prepare
     if: ${{ needs.prepare.outputs.should_run == 'true' }}
     runs-on: ubuntu-latest
+    # Per-PR group so unrelated GPU runs can't cancel this one while it's pending;
+    # a newer approval of the same PR supersedes an older run. Daytona queues GPU
+    # capacity and the launcher retries quota errors when runs overlap.
     concurrency:
-      group: tensorpow-daytona-gpu
-      cancel-in-progress: false
+      group: tensorpow-daytona-gpu-pr-${{ needs.prepare.outputs.pr_number }}
+      cancel-in-progress: true
     env:
       DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
       DAYTONA_GPU_SNAPSHOT: ${{ vars.DAYTONA_GPU_SNAPSHOT || 'daytona-gpu' }}
@@ -193,10 +196,15 @@ jobs:
       - name: Install Daytona runner dependencies
         run: python -m pip install "daytona>=0.226.0,<0.227.0"
       - name: Run CUDA determinism in Daytona
+        id: cuda
+        # exec so Python is the step's entry process and receives the cancel SIGINT.
         run: |
-          python scripts/run_daytona_cuda_ci.py \
+          exec python scripts/run_daytona_cuda_ci.py \
             --repository "${{ needs.prepare.outputs.head_repo }}" \
             --sha "${{ needs.prepare.outputs.head_sha }}"
+      - name: Clean up Daytona sandboxes
+        if: ${{ always() && steps.cuda.outcome != 'skipped' }}
+        run: python scripts/run_daytona_cuda_ci.py --cleanup
 
   publish-status:
     name: Publish approved CI status
@@ -215,6 +223,15 @@ jobs:
           MPS_RESULT: ${{ needs.macos-arm-mps.result }}
           CUDA_RESULT: ${{ needs.daytona-cuda.result }}
         run: |
+          # A cancelled run was superseded (or stopped by hand); posting from it
+          # could overwrite the status of a newer run for the same SHA.
+          for result in "$PYTHON_RESULT" "$X86_RESULT" "$ARM_RESULT" "$MPS_RESULT" "$CUDA_RESULT"; do
+            if [ "$result" = cancelled ]; then
+              echo "A job was cancelled; leaving the approved-pr-ci status to the newer run."
+              exit 0
+            fi
+          done
+
           if [ "$PYTHON_RESULT" = success ] && \
              [ "$X86_RESULT" = success ] && \
              [ "$ARM_RESULT" = success ] && \
