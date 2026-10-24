@@ -20,8 +20,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
+          # No dependency cache next to DAYTONA_API_KEY: approved PR code runs in
+          # the default branch's cache scope and could plant a poisoned entry.
           python-version: "3.12"
-          cache: "pip"
       - name: Install Daytona setup dependencies
         run: python -m pip install "daytona>=0.226.0,<0.227.0"
       - name: Verify Daytona GPU snapshot
