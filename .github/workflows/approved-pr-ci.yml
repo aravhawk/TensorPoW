@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout approved PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ needs.prepare.outputs.head_repo }}
           ref: ${{ needs.prepare.outputs.head_sha }}
@@ -92,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout approved PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ needs.prepare.outputs.head_repo }}
           ref: ${{ needs.prepare.outputs.head_sha }}
@@ -118,7 +118,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout approved PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ needs.prepare.outputs.head_repo }}
           ref: ${{ needs.prepare.outputs.head_sha }}
@@ -144,7 +144,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout approved PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ needs.prepare.outputs.head_repo }}
           ref: ${{ needs.prepare.outputs.head_sha }}
