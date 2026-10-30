@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=80.0", "wheel"]
+requires = ["setuptools>=84.1.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -20,7 +20,7 @@ dependencies = [
     "protobuf>=5.29.0,<7.0.0",
     "reedsolo>=1.7.0,<2.0.0",
     "rocksdict>=0.3.29,<0.4.0",
-    "torch>=2.12.0,<3.0.0",
+    "torch>=2.13.0,<3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -30,7 +30,7 @@ dev = [
     "pre-commit>=4.6.0,<5.0.0",
     "pytest>=9.0.3,<10.0.0",
     "ruff>=0.15.14,<0.16.0",
-    "virtualenv>=21.14.9,<22.0.0",
+    "virtualenv>=21.14.13,<22.0.0",
 ]
 storage = [
     "rocksdict>=0.3.29,<0.4.0",
