@@ -20,7 +20,7 @@ dependencies = [
     "protobuf>=5.29.0,<7.0.0",
     "reedsolo>=1.7.0,<2.0.0",
     "rocksdict>=0.3.29,<0.4.0",
-    "torch>=2.12.0,<3.0.0",
+    "torch>=2.13.0,<3.0.0",
 ]
 
 [project.optional-dependencies]
