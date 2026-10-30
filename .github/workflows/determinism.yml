@@ -79,7 +79,10 @@ jobs:
             sudo apt-get install -y libgmp-dev
           fi
       - name: Install package
-        run: python -m pip install -e ".[dev]"
+        # CI-only cap: torch 2.15 regressed MPS int32 matmul on GitHub's paravirtual
+        # macOS runners, so the deterministic MPS backend reports unavailable there.
+        # Remove this cap once a torch release fixes the regression.
+        run: python -m pip install -e ".[dev]" "torch<2.15"
       - name: Run determinism tests
         env:
           TENSORPOW_DETERMINISM_BACKEND: mps
