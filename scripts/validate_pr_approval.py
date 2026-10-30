@@ -42,7 +42,7 @@ def output(name: str, value: str) -> None:
     print(f"{name}={value}")
 
 
-def api_json(path: str) -> Any:
+def api_json(path: str, *, allow_not_found: bool = False) -> Any:
     repository = os.environ["GITHUB_REPOSITORY"]
     token = os.environ["GITHUB_TOKEN"]
     request = urllib.request.Request(
@@ -57,6 +57,8 @@ def api_json(path: str) -> Any:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        if allow_not_found and exc.code == 404:
+            return None
         detail = exc.read().decode("utf-8", errors="replace")
         fail(f"GitHub API {path!r} returned {exc.code}: {detail}")
 
@@ -64,7 +66,10 @@ def api_json(path: str) -> Any:
 def has_write_access(user: str) -> bool:
     # The real repository permission, not author_association: that field can't tell
     # write from triage/read collaborators and reports MEMBER for any org member.
-    payload = api_json(f"collaborators/{user}/permission")
+    # 404 means the user has no collaborator record, so no write access either.
+    payload = api_json(f"collaborators/{user}/permission", allow_not_found=True)
+    if payload is None:
+        return False
     return str(payload.get("permission", "")).lower() in AUTHORIZED_PERMISSIONS
 
 
@@ -154,8 +159,7 @@ def validate(approval: Approval) -> None:
         reviewer = str(user.get("login", ""))
         if not reviewer:
             continue
-        review_permission = api_json(f"collaborators/{reviewer}/permission")
-        if str(review_permission.get("permission", "")).lower() not in AUTHORIZED_PERMISSIONS:
+        if not has_write_access(reviewer):
             continue
         submitted_at = str(review.get("submitted_at", ""))
         if submitted_at >= latest_submitted_at:
