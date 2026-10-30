@@ -1,0 +1,59 @@
+name: Trusted PR CI
+
+# Runs full PR CI automatically for PRs whose head branch lives in this repository
+# and whose author has admin, maintain or write permission. Every other PR (forks,
+# bots, authors without write access) waits for approved-pr-ci.yml instead.
+#
+# This is pull_request, never pull_request_target: GitHub withholds secrets and
+# hands a read-only token to fork PRs here, so the trust gate below is not what keeps
+# DAYTONA_API_KEY away from fork code. Same-repo branches can only be pushed by users
+# (or apps) with write access, which is why their PR code may run with secrets.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+# A newer push to the PR supersedes the run for the older head.
+concurrency:
+  group: trusted-pr-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  trust:
+    name: Check PR trust
+    # Drafts wait for ready_for_review; fork PRs never qualify.
+    if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.trust.outputs.should_run }}
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check author permission
+        id: trust
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python scripts/validate_pr_approval.py --trusted-pr
+
+  ci:
+    name: PR CI
+    needs: trust
+    if: ${{ needs.trust.outputs.should_run == 'true' }}
+    permissions:
+      contents: read
+      statuses: write
+    uses: ./.github/workflows/pr-ci-jobs.yml
+    with:
+      pr_number: ${{ github.event.pull_request.number }}
+      head_repo: ${{ github.event.pull_request.head.repo.full_name }}
+      head_sha: ${{ github.event.pull_request.head.sha }}
+    secrets:
+      DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}

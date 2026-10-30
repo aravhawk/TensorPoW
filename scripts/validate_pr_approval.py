@@ -1,4 +1,9 @@
-"""Validate that an approved PR review still authorizes CI for the current head SHA."""
+"""Decide whether a PR's head SHA is authorized to run full PR CI.
+
+Two modes, one per entry point:
+  - default (approved-pr-ci.yml): a write-access review approved the current head SHA.
+  - --trusted-pr (trusted-pr-ci.yml): the PR is trusted, so it runs without approval.
+"""
 
 from __future__ import annotations
 
@@ -56,6 +61,27 @@ def api_json(path: str) -> Any:
         fail(f"GitHub API {path!r} returned {exc.code}: {detail}")
 
 
+def has_write_access(user: str) -> bool:
+    # The real repository permission, not author_association: that field can't tell
+    # write from triage/read collaborators and reports MEMBER for any org member.
+    payload = api_json(f"collaborators/{user}/permission")
+    return str(payload.get("permission", "")).lower() in AUTHORIZED_PERMISSIONS
+
+
+def is_trusted_pr(author: str, head_repo: str) -> bool:
+    """A PR is trusted when its head branch is in this repo and its author can write.
+
+    Only write-access users and apps can push branches here, so a same-repo head is
+    what actually keeps untrusted code away from secrets. Requiring the author's
+    permission too keeps bot and app PRs (dependabot[bot] reports "none"), and PRs
+    anyone can open from an existing branch here, behind a maintainer approval.
+    """
+    repository = os.environ["GITHUB_REPOSITORY"]
+    if head_repo.casefold() != repository.casefold():
+        return False
+    return bool(author) and has_write_access(author)
+
+
 def load_approval() -> Approval | None:
     artifact_dir = Path(os.environ.get("APPROVAL_ARTIFACT_DIR", "approval-artifacts"))
     files = sorted(artifact_dir.glob("**/approval.json"))
@@ -107,6 +133,13 @@ def validate(approval: Approval) -> None:
             f"does not match current PR head repo {current_repo!r}"
         )
 
+    author = str((pr_payload.get("user") or {}).get("login", ""))
+    if is_trusted_pr(author, current_repo):
+        # trusted-pr-ci.yml already ran (or will run) this SHA; don't spend GPU twice.
+        print("trusted PR: CI runs automatically from trusted-pr-ci.yml")
+        output("should_run", "false")
+        return
+
     reviews = api_json(f"pulls/{approval.pr_number}/reviews?per_page=100")
     if not isinstance(reviews, list):
         fail("reviews API returned a non-list payload")
@@ -142,8 +175,22 @@ def validate(approval: Approval) -> None:
     output("approved_by", latest_reviewer)
 
 
-def main() -> int:
+def validate_trusted_pr() -> None:
+    author = os.environ["PR_AUTHOR"]
+    head_repo = os.environ["HEAD_REPO"]
+    if not is_trusted_pr(author, head_repo):
+        print(f"PR #{os.environ['PR_NUMBER']} by {author!r} from {head_repo!r} needs approval")
+        return
+    output("should_run", "true")
+
+
+def main(args: list[str]) -> int:
     output("should_run", "false")
+    if args == ["--trusted-pr"]:
+        validate_trusted_pr()
+        return 0
+    if args:
+        fail(f"unexpected arguments: {args}")
     approval = load_approval()
     if approval is None:
         return 0
@@ -152,4 +199,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))
