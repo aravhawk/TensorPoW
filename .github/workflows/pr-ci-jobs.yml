@@ -1,0 +1,272 @@
+name: PR CI jobs
+
+# Full PR CI, shared by both entry points:
+#   - trusted-pr-ci.yml runs it automatically for same-repo PRs by write-access authors.
+#   - approved-pr-ci.yml runs it for any other PR once a write-access reviewer approves
+#     the exact head SHA.
+# Callers must authorize head_repo@head_sha before calling; nothing here re-checks it.
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: Pull request number, used for the GPU concurrency group.
+        required: true
+        type: number
+      head_repo:
+        description: Repository holding the authorized PR head, in owner/name form.
+        required: true
+        type: string
+      head_sha:
+        description: Authorized PR head commit to test and report status on.
+        required: true
+        type: string
+    secrets:
+      DAYTONA_API_KEY:
+        required: true
+
+permissions: {}
+
+jobs:
+  mark-pending:
+    name: Mark PR CI pending
+    permissions:
+      statuses: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark approved-pr-ci pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            -f state=pending \
+            -f context=approved-pr-ci \
+            -f description="PR CI is running" \
+            -f target_url="${TARGET_URL}"
+
+  python:
+    name: Python checks
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout authorized PR head
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.head_repo }}
+          ref: ${{ inputs.head_sha }}
+          persist-credentials: false
+          # Fork PRs reach this only from approved-pr-ci.yml, after it verified via
+          # the GitHub API a write-access approval of this exact head SHA.
+          allow-unsafe-pr-checkout: true
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          # No dependency cache: PR code runs here and could poison main's cache.
+          python-version: "3.12"
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+      - name: Ruff check
+        run: ruff check .
+      - name: Ruff format
+        run: ruff format --check .
+      - name: Mypy
+        run: mypy src scripts
+      - name: Pytest
+        run: pytest tests
+
+  linux-x86-cpu:
+    name: Linux x86 CPU determinism
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout authorized PR head
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.head_repo }}
+          ref: ${{ inputs.head_sha }}
+          persist-credentials: false
+          # Fork PRs reach this only from approved-pr-ci.yml, after it verified via
+          # the GitHub API a write-access approval of this exact head SHA.
+          allow-unsafe-pr-checkout: true
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          # No dependency cache: PR code runs here and could poison main's cache.
+          python-version: "3.12"
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+      - name: Run determinism tests
+        env:
+          TENSORPOW_DETERMINISM_BACKEND: cpu
+        run: pytest -m determinism tests/determinism
+
+  linux-arm-cpu:
+    name: Linux ARM CPU determinism
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout authorized PR head
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.head_repo }}
+          ref: ${{ inputs.head_sha }}
+          persist-credentials: false
+          # Fork PRs reach this only from approved-pr-ci.yml, after it verified via
+          # the GitHub API a write-access approval of this exact head SHA.
+          allow-unsafe-pr-checkout: true
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          # No dependency cache: PR code runs here and could poison main's cache.
+          python-version: "3.12"
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+      - name: Run determinism tests
+        env:
+          TENSORPOW_DETERMINISM_BACKEND: cpu
+        run: pytest -m determinism tests/determinism
+
+  macos-arm-mps:
+    name: macOS ARM MPS determinism
+    permissions:
+      contents: read
+    runs-on: macos-latest
+    steps:
+      - name: Checkout authorized PR head
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.head_repo }}
+          ref: ${{ inputs.head_sha }}
+          persist-credentials: false
+          # Fork PRs reach this only from approved-pr-ci.yml, after it verified via
+          # the GitHub API a write-access approval of this exact head SHA.
+          allow-unsafe-pr-checkout: true
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          # No dependency cache: PR code runs here and could poison main's cache.
+          python-version: "3.12"
+      - name: Install system packages
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y libgmp-dev
+          fi
+      - name: Install package
+        # CI-only cap: torch 2.15 regressed MPS int32 matmul on GitHub's paravirtual
+        # macOS runners, so the deterministic MPS backend reports unavailable there.
+        # Remove this cap once a torch release fixes the regression.
+        run: python -m pip install -e ".[dev]" "torch<2.15"
+      - name: Run determinism tests
+        env:
+          TENSORPOW_DETERMINISM_BACKEND: mps
+        run: pytest -m determinism tests/determinism
+
+  daytona-cuda:
+    name: Daytona H100 CUDA determinism
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    # Per-PR group shared by both entry points, so unrelated GPU runs can't cancel
+    # this one while it's pending and a newer run for the same PR supersedes an older
+    # one. Daytona queues GPU capacity and the launcher retries quota errors when
+    # runs overlap.
+    concurrency:
+      group: tensorpow-daytona-gpu-pr-${{ inputs.pr_number }}
+      cancel-in-progress: true
+    # Bounds GPU spend: up to ~35 min of GPU queueing plus setup and tests.
+    timeout-minutes: 90
+    env:
+      DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+      DAYTONA_GPU_SNAPSHOT: ${{ vars.DAYTONA_GPU_SNAPSHOT || 'daytona-gpu' }}
+      DAYTONA_GPU_EXPECTED_DEVICE_TOKENS: ${{ vars.DAYTONA_GPU_EXPECTED_DEVICE_TOKENS || 'h100' }}
+      DAYTONA_GPU_QUEUE_TIMEOUT_MINUTES: ${{ vars.DAYTONA_GPU_QUEUE_TIMEOUT_MINUTES }}
+    steps:
+      # The caller's own ref, never the fork head: the default branch for
+      # approved-pr-ci.yml (workflow_run), or the same-repo PR merge ref for
+      # trusted-pr-ci.yml, whose code only write-access users can push.
+      - name: Checkout trusted scripts
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          # No dependency cache next to DAYTONA_API_KEY: approved PR code runs in
+          # the default branch's cache scope and could plant a poisoned entry.
+          python-version: "3.12"
+      - name: Install Daytona runner dependencies
+        run: python -m pip install "daytona>=0.226.0,<0.227.0"
+      - name: Run CUDA determinism in Daytona
+        id: cuda
+        env:
+          HEAD_REPO: ${{ inputs.head_repo }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        # exec so Python is the step's entry process and receives the cancel SIGINT.
+        run: |
+          exec python scripts/run_daytona_cuda_ci.py \
+            --repository "$HEAD_REPO" \
+            --sha "$HEAD_SHA"
+      - name: Clean up Daytona sandboxes
+        if: ${{ always() && steps.cuda.outcome != 'skipped' }}
+        run: python scripts/run_daytona_cuda_ci.py --cleanup
+
+  publish-status:
+    name: Publish PR CI status
+    needs: [mark-pending, python, linux-x86-cpu, linux-arm-cpu, macos-arm-mps, daytona-cuda]
+    if: ${{ always() }}
+    permissions:
+      statuses: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish combined status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PYTHON_RESULT: ${{ needs.python.result }}
+          X86_RESULT: ${{ needs.linux-x86-cpu.result }}
+          ARM_RESULT: ${{ needs.linux-arm-cpu.result }}
+          MPS_RESULT: ${{ needs.macos-arm-mps.result }}
+          CUDA_RESULT: ${{ needs.daytona-cuda.result }}
+        run: |
+          # A cancelled run was superseded (or stopped by hand); posting from it
+          # could overwrite the status of a newer run for the same SHA.
+          for result in "$PYTHON_RESULT" "$X86_RESULT" "$ARM_RESULT" "$MPS_RESULT" "$CUDA_RESULT"; do
+            if [ "$result" = cancelled ]; then
+              echo "A job was cancelled; leaving the approved-pr-ci status to the newer run."
+              exit 0
+            fi
+          done
+
+          if [ "$PYTHON_RESULT" = success ] && \
+             [ "$X86_RESULT" = success ] && \
+             [ "$ARM_RESULT" = success ] && \
+             [ "$MPS_RESULT" = success ] && \
+             [ "$CUDA_RESULT" = success ]; then
+            state=success
+            description="PR CI passed"
+          else
+            state=failure
+            description="PR CI failed"
+          fi
+
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            -f state="$state" \
+            -f context=approved-pr-ci \
+            -f description="$description" \
+            -f target_url="${TARGET_URL}"
