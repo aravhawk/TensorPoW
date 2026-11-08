@@ -54,3 +54,9 @@ six-hour CPU/MPS/CPU/CUDA soak with matching consensus reports, a public
 
 Whitepaper artifacts live under `docs/whitepaper/`; the reproducible normalized
 source hash and PDF hash are committed for ceremony input verification.
+
+## License
+
+Copyright 2024-2026 Arav Jain. Licensed under the Apache License, Version 2.0.
+See `LICENSE`.
+
