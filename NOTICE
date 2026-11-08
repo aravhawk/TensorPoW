@@ -1,0 +1,94 @@
+TensorPoW
+
+Licensing scope
+===============
+The Apache License, Version 2.0 in LICENSE applies to owner-controlled
+additions and modifications. It does not relicense historic MIT-licensed
+material as exclusively Apache-2.0, and it does not establish exclusive
+ownership of work published under the 2024 Tensorcoin MIT notice.
+
+This repository was first published under the MIT License with the
+copyright notice "Copyright (c) 2024 Tensorcoin" (commit
+c077ed95c31449423b586b6170a9b871c1b645c1, 2024-10-31). Git history in
+this repository does not independently determine whether "Tensorcoin"
+names a distinct copyright holder. An unresolvable GitHub organization
+is not evidence that no such holder exists, and that notice is not
+treated as extinguished.
+
+On 2026-03-09 (commit a3fe2c7d6508820181b8791d7a6f29081db04a2f) the root
+LICENSE copyright line was changed from "Copyright (c) 2024 Tensorcoin"
+to "Copyright (c) 2026 Arav Jain" without a recorded assignment or other
+instrument in this repository. That edit is not treated here as proof
+that the 2024 notice no longer applies.
+
+The current reference implementation was added on 2026-05-28 (commit
+073aec32b36a2835388389e95484359b007ee089). That commit deleted prototype
+files bruteforce.py, hash.py, and torch_ext.py. Those prototype files are
+not in the current tree. This repository does not resolve whether the
+current source is a new work or a derivative of the 2024 MIT-licensed
+prototype. Until that is resolved, historic MIT rights and notices are
+retained, and Apache 2.0 is claimed only for owner-controlled additions.
+
+Standalone copies of the historic MIT notices are also kept in
+LICENSES/MIT-Tensorcoin-2024.txt and LICENSES/MIT-Arav-Jain-2026.txt.
+
+Copyright notices
+=================
+Copyright (c) 2024 Tensorcoin
+Copyright (c) 2026 Arav Jain
+
+Historic MIT notice as originally published 2024-10-31
+======================================================
+MIT License
+
+Copyright (c) 2024 Tensorcoin
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Historic MIT notice as published 2026-03-09
+===========================================
+MIT License
+
+Copyright (c) 2026 Arav Jain
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Owner-controlled additions
+==========================
+Copyright 2026 Arav Jain
+
+Licensed under the Apache License, Version 2.0.
+Apache 2.0 applies to owner-controlled additions and modifications only.
+Underlying MIT rights in historic material are retained.

@@ -54,3 +54,15 @@ six-hour CPU/MPS/CPU/CUDA soak with matching consensus reports, a public
 
 Whitepaper artifacts live under `docs/whitepaper/`; the reproducible normalized
 source hash and PDF hash are committed for ceremony input verification.
+
+## License
+
+Owner-controlled additions are licensed under the Apache License, Version 2.0.
+See `LICENSE`.
+
+This repository was first published under the MIT License,
+`Copyright (c) 2024 Tensorcoin`. That historic copyright and permission
+notice is preserved in `NOTICE` and `LICENSES/MIT-Tensorcoin-2024.txt`.
+Apache 2.0 does not relicense that historic MIT-licensed material as
+exclusively owner-controlled. See `NOTICE` for licensing scope.
+
