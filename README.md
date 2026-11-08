@@ -57,6 +57,12 @@ source hash and PDF hash are committed for ceremony input verification.
 
 ## License
 
-Copyright 2024-2026 Arav Jain. Licensed under the Apache License, Version 2.0.
+Owner-controlled additions are licensed under the Apache License, Version 2.0.
 See `LICENSE`.
+
+This repository was first published under the MIT License,
+`Copyright (c) 2024 Tensorcoin`. That historic copyright and permission
+notice is preserved in `NOTICE` and `LICENSES/MIT-Tensorcoin-2024.txt`.
+Apache 2.0 does not relicense that historic MIT-licensed material as
+exclusively owner-controlled. See `NOTICE` for licensing scope.
 
