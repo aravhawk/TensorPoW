@@ -1086,6 +1086,17 @@ class TensorPowNode:
     def _has_stored_fruits(self) -> bool:
         return next(self.store.items_with_prefix(COLUMN_DAG, FRUIT_KIND_PREFIX), None) is not None
 
+    def _has_kind(self, prefix: bytes, block_hash: bytes) -> bool:
+        """Return whether ``block_hash`` is tagged as this kind in the explicit index.
+
+        Bodies of both kinds share COLUMN_BODIES; the index written in the same atomic
+        batch as the body is the authority on which decoder applies (no trial parsing).
+        """
+
+        if not isinstance(block_hash, bytes) or len(block_hash) != HASH_LEN_BYTES:
+            return False
+        return self.store.get(COLUMN_DAG, prefix + block_hash) is not None
+
     def _stored_anchor_hashes(self) -> tuple[bytes, ...]:
         return tuple(
             key[len(ANCHOR_KIND_PREFIX) :]
@@ -1108,6 +1119,8 @@ class TensorPowNode:
     def _load_anchor(self, block_hash: bytes) -> Anchor | None:
         if block_hash == GENESIS_PARENT_HASH:
             return None
+        if not self._has_kind(ANCHOR_KIND_PREFIX, block_hash):
+            return None
         try:
             body = self.store.get_body_bytes(block_hash)
         except (TypeError, ValueError):
@@ -1121,6 +1134,8 @@ class TensorPowNode:
 
     def _load_fruit(self, block_hash: bytes) -> Fruit | None:
         if block_hash == GENESIS_PARENT_HASH:
+            return None
+        if not self._has_kind(FRUIT_KIND_PREFIX, block_hash):
             return None
         try:
             body = self.store.get_body_bytes(block_hash)

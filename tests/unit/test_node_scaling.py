@@ -240,3 +240,40 @@ def test_overlay_view_add_remove_semantics() -> None:
     with pytest.raises(KeyError):
         view.add(base_utxo)
     assert base.get(base_utxo.outpoint) == base_utxo
+
+
+def test_block_kind_comes_from_the_tag_not_trial_parsing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """I-7: fruit vs anchor is decided by the explicit kind tag, not by which decoder works."""
+
+    node = _node(tmp_path / "node")
+    try:
+        anchor_hash, fruit_hash, _timestamp = _build_linear_chain(node, 1)
+        attempts: list[str] = []
+        original_fruit = node_module.Fruit.deserialize
+        original_anchor = node_module.Anchor.deserialize
+
+        def fruit_decode(data: bytes) -> object:
+            attempts.append("fruit")
+            return original_fruit(data)
+
+        def anchor_decode(data: bytes) -> object:
+            attempts.append("anchor")
+            return original_anchor(data)
+
+        monkeypatch.setattr(node_module.Fruit, "deserialize", fruit_decode)
+        monkeypatch.setattr(node_module.Anchor, "deserialize", anchor_decode)
+
+        assert node._load_fruit(anchor_hash) is None
+        assert node._load_anchor(fruit_hash) is None
+        assert attempts == []
+        assert node._load_fruit(fruit_hash) is not None
+        assert node._load_anchor(anchor_hash) is not None
+        assert attempts == ["fruit", "anchor"]
+
+        node.store.delete(COLUMN_DAG, b"kind:fruit:" + fruit_hash)
+        assert node._load_fruit(fruit_hash) is None
+    finally:
+        node.close()
