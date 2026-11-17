@@ -144,3 +144,31 @@ def test_cpu_private_int_mm_probe_requires_exact_parity(monkeypatch: pytest.Monk
     assert kernel._cpu_int_mm_available()
     assert torch.equal(kernel._int_mm(left, right), reference)
     kernel._cpu_int_mm_available.cache_clear()
+
+
+def test_cuda_backend_requires_a_passing_device_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """I-4: CUDA is selected only after torch._int_mm is checked on the CUDA device."""
+
+    import tensorpow.pow.kernel as kernel
+
+    kernel._cuda_int_mm_available.cache_clear()
+    monkeypatch.setattr(kernel.torch.cuda, "is_available", lambda: True)
+
+    def broken_cuda_int_mm(left: object, right: object) -> object:
+        raise RuntimeError("CUDA kernel not available for this build")
+
+    monkeypatch.setattr(kernel, "_cuda_int_mm", broken_cuda_int_mm)
+    try:
+        assert kernel.resolve_backend("auto") != "cuda"
+        with pytest.raises(kernel.PowBackendUnavailableError, match="exactness probe"):
+            kernel.resolve_backend("cuda")
+
+        def wrong_cuda_int_mm(left: object, right: object) -> object:
+            reference = left.to(kernel.torch.int32) @ right.to(kernel.torch.int32)  # type: ignore[attr-defined]
+            return reference + 1
+
+        kernel._cuda_int_mm_available.cache_clear()
+        monkeypatch.setattr(kernel, "_cuda_int_mm", wrong_cuda_int_mm)
+        assert kernel.resolve_backend("auto") != "cuda"
+    finally:
+        kernel._cuda_int_mm_available.cache_clear()

@@ -77,9 +77,7 @@ def matmul_int8(
     resolved_backend = resolve_backend(backend)
 
     if resolved_backend == "cuda":
-        result = _int_mm(left_tensor.to("cuda"), right_tensor.to("cuda"))
-        torch.cuda.synchronize()
-        result = result.cpu()
+        result = _cuda_int_mm(left_tensor, right_tensor)
     elif resolved_backend == "mps":
         result = _mps_int32_mm(left_tensor, right_tensor)
     else:
@@ -101,7 +99,7 @@ def resolve_backend(backend: Backend) -> Literal["cpu", "cuda", "mps"]:
         raise ValueError(f"unknown PoW backend {backend!r}")
 
     if backend == "auto":
-        if torch.cuda.is_available() and callable(getattr(torch, "_int_mm", None)):
+        if _cuda_int_mm_available():
             return "cuda"
         if _mps_int32_mm_available():
             return "mps"
@@ -111,6 +109,10 @@ def resolve_backend(backend: Backend) -> Literal["cpu", "cuda", "mps"]:
             raise PowBackendUnavailableError("CUDA backend requested but CUDA is unavailable")
         if not callable(getattr(torch, "_int_mm", None)):
             raise PowBackendUnavailableError("CUDA backend requires torch._int_mm")
+        if not _cuda_int_mm_available():
+            raise PowBackendUnavailableError(
+                "CUDA backend requested but torch._int_mm on CUDA failed the exactness probe"
+            )
         return "cuda"
     if backend == "mps":
         if not _mps_int32_mm_available():
@@ -222,6 +224,38 @@ def _cpu_int_mm_probe_matrices() -> tuple[torch.Tensor, torch.Tensor]:
     left = ((values * 17 + 13) % 256 - 128).to(torch.int8).contiguous()
     right = ((values * 31 + 7) % 256 - 128).to(torch.int8).contiguous()
     return left, right
+
+
+def _cuda_int_mm(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+    int_mm = getattr(torch, "_int_mm", None)
+    if not callable(int_mm):
+        raise PowBackendUnavailableError("CUDA backend requires torch._int_mm")
+    result = cast(torch.Tensor, int_mm(left.to("cuda"), right.to("cuda")))
+    torch.cuda.synchronize()
+    return result.cpu()
+
+
+@cache
+def _cuda_int_mm_available() -> bool:
+    """Probe torch._int_mm on the CUDA device itself, not just the CPU build.
+
+    The probe uses consensus-sized matrices including INT8_MIN extremes and must match
+    an exact CPU int32 reference bit for bit; otherwise CUDA is not used for consensus.
+    """
+
+    if not torch.cuda.is_available() or not callable(getattr(torch, "_int_mm", None)):
+        return False
+    try:
+        left, right = _mps_probe_matrices()
+        reference = left.to(torch.int32) @ right.to(torch.int32)
+        result = _cuda_int_mm(left, right)
+    except (RuntimeError, PowBackendUnavailableError):
+        return False
+    return (
+        result.dtype == torch.int32
+        and tuple(result.shape) == tuple(reference.shape)
+        and torch.equal(result, reference)
+    )
 
 
 def _mps_int32_mm(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
