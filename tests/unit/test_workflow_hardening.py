@@ -58,3 +58,13 @@ def test_sandbox_bootstrap_verifies_pinned_uv_and_installs_from_lockfile() -> No
     assert command.index("sha256sum -c") < command.index("tar -xzf")
     assert f"/download/{runner.UV_VERSION}/" in command
     assert "sync --locked" in command
+
+
+def test_ci_installs_the_locked_environment() -> None:
+    """L-9: CI tests exactly what uv.lock pins instead of a fresh pip resolution."""
+
+    for workflow in WORKFLOWS:
+        text = workflow.read_text(encoding="utf-8")
+        assert "pip install -e" not in text, workflow.name
+        if re.search(r"run: (?:pytest|ruff|mypy)", text):
+            assert "uv sync --locked" in text, workflow.name
