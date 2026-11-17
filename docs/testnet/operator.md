@@ -75,6 +75,20 @@ read -rs TENSORPOW_TESTNET_FAUCET_PASSWORD && export TENSORPOW_TESTNET_FAUCET_PA
 
 Submit the returned `rawtx` to `sendrawtx` on a synced node.
 
+### Public faucet abuse controls
+
+`testnet_ops.py serve` in faucet mode enforces, by default: a 24 h cooldown per
+recipient address (`--faucet-address-cooldown`), a 1 h cooldown per client IP
+(`--faucet-ip-cooldown`), a global cap of 120 payouts per rolling hour
+(`--faucet-max-per-hour`), a POST token bucket per IP, a 10 s socket read
+timeout and a 32-connection cap. Clients must also solve a hashcash challenge
+(`GET /faucet/challenge`, then POST `{"address", "challenge", "solution"}`)
+whose difficulty is `--faucet-pow-bits` (default 18; 0 disables).
+`testnet_ops.solve_faucet_challenge` is a reference solver. Challenges are
+HMAC-signed, expire after 5 minutes, are bound to the recipient address and
+are single-use. If the faucet runs behind a reverse proxy, enforce per-IP
+limits there too, because the server only sees the proxy address.
+
 ## Minimal Explorer
 
 Run the local explorer/faucet HTTP facade against a node RPC endpoint:

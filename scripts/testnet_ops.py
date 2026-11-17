@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hmac
 import http.client
 import ipaddress
 import json
 import os
 import re
+import socket
 import sys
-from collections.abc import Mapping, Sequence
+import time
+from collections import OrderedDict
+from collections.abc import Callable, Mapping, Sequence
+from hashlib import sha256
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import RLock
-from typing import Final, cast
+from threading import BoundedSemaphore, Lock, RLock
+from typing import Any, Final, cast
 from urllib.parse import parse_qs, urlparse
+
+from blake3 import blake3
 
 from tensorpow.crypto.address import address_to_pubkey_hash, validate_address
 from tensorpow.genesis import (
@@ -32,6 +40,17 @@ from tensorpow.wallet import Wallet, load_utxos_json, load_wallet, utxos_to_json
 DEFAULT_TESTNET_RPC_URL: Final[str] = "http://127.0.0.1:28332/rpc"
 DEFAULT_FAUCET_PASSWORD_ENV: Final[str] = "TENSORPOW_TESTNET_FAUCET_PASSWORD"
 MAX_TESTNET_HTTP_BODY_BYTES: Final[int] = 1_048_576
+TESTNET_HTTP_TIMEOUT_SECONDS: Final[float] = 10.0
+TESTNET_HTTP_MAX_CONNECTIONS: Final[int] = 32
+FAUCET_ADDRESS_COOLDOWN_SECONDS: Final[float] = 24 * 60 * 60
+FAUCET_IP_COOLDOWN_SECONDS: Final[float] = 60 * 60
+FAUCET_MAX_DISPENSES_PER_HOUR: Final[int] = 120
+FAUCET_MAX_TRACKED_KEYS: Final[int] = 100_000
+POST_RATE_PER_SECOND: Final[float] = 1.0
+POST_BURST: Final[int] = 10
+DEFAULT_FAUCET_POW_BITS: Final[int] = 18
+FAUCET_CHALLENGE_TTL_SECONDS: Final[float] = 300.0
+FAUCET_CHALLENGE_DOMAIN: Final[bytes] = b"tensorpow-testnet-faucet-v1"
 DNS_LABEL_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
@@ -97,6 +116,30 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--faucet-utxos", type=Path)
     serve.add_argument("--faucet-amount", type=int)
     serve.add_argument("--faucet-fee", type=int, default=0)
+    serve.add_argument(
+        "--faucet-pow-bits",
+        type=int,
+        default=DEFAULT_FAUCET_POW_BITS,
+        help="leading zero bits required in the faucet client challenge (0 disables)",
+    )
+    serve.add_argument(
+        "--faucet-address-cooldown",
+        type=float,
+        default=FAUCET_ADDRESS_COOLDOWN_SECONDS,
+        help="seconds before the same address can be funded again",
+    )
+    serve.add_argument(
+        "--faucet-ip-cooldown",
+        type=float,
+        default=FAUCET_IP_COOLDOWN_SECONDS,
+        help="seconds before the same client IP can be funded again",
+    )
+    serve.add_argument(
+        "--faucet-max-per-hour",
+        type=int,
+        default=FAUCET_MAX_DISPENSES_PER_HOUR,
+        help="global cap on faucet payouts per rolling hour",
+    )
     serve.set_defaults(handler=_cmd_serve)
     return parser
 
@@ -175,6 +218,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         port=args.port,
         rpc_url=args.rpc_url,
         faucet_state=_faucet_state_from_args(args),
+        limiter=FaucetLimiter(
+            address_cooldown_seconds=args.faucet_address_cooldown,
+            ip_cooldown_seconds=args.faucet_ip_cooldown,
+            max_dispenses_per_hour=args.faucet_max_per_hour,
+        ),
+        challenge=FaucetChallenge(args.faucet_pow_bits) if args.faucet_pow_bits > 0 else None,
     )
     try:
         server.serve_forever()
@@ -264,6 +313,163 @@ class FaucetState:
         os.replace(tmp_path, self.utxos_path)
 
 
+class FaucetLimiter:
+    """Per-address and per-IP faucet cooldowns, a global hourly cap and POST throttling.
+
+    All tables are bounded; the oldest entries are evicted first.
+    """
+
+    def __init__(
+        self,
+        *,
+        address_cooldown_seconds: float = FAUCET_ADDRESS_COOLDOWN_SECONDS,
+        ip_cooldown_seconds: float = FAUCET_IP_COOLDOWN_SECONDS,
+        max_dispenses_per_hour: int = FAUCET_MAX_DISPENSES_PER_HOUR,
+        post_rate_per_second: float = POST_RATE_PER_SECOND,
+        post_burst: int = POST_BURST,
+        max_tracked_keys: int = FAUCET_MAX_TRACKED_KEYS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if address_cooldown_seconds < 0 or ip_cooldown_seconds < 0:
+            raise TestnetOpsError("faucet cooldowns must be non-negative")
+        self.address_cooldown_seconds = address_cooldown_seconds
+        self.ip_cooldown_seconds = ip_cooldown_seconds
+        self.max_dispenses_per_hour = _positive_int("faucet_max_per_hour", max_dispenses_per_hour)
+        self.post_rate_per_second = post_rate_per_second
+        self.post_burst = _positive_int("post_burst", post_burst)
+        self.max_tracked_keys = _positive_int("max_tracked_keys", max_tracked_keys)
+        self._clock = clock
+        self._lock = Lock()
+        self._address_until: OrderedDict[str, float] = OrderedDict()
+        self._ip_until: OrderedDict[str, float] = OrderedDict()
+        self._recent: list[float] = []
+        self._post_tokens: OrderedDict[str, tuple[float, float]] = OrderedDict()
+
+    def allow_post(self, client_ip: str) -> bool:
+        """Charge one POST to ``client_ip``'s token bucket."""
+
+        with self._lock:
+            now = self._clock()
+            tokens, updated = self._post_tokens.pop(client_ip, (float(self.post_burst), now))
+            tokens = min(
+                float(self.post_burst),
+                tokens + max(0.0, now - updated) * self.post_rate_per_second,
+            )
+            allowed = tokens >= 1.0
+            self._post_tokens[client_ip] = (tokens - 1.0 if allowed else tokens, now)
+            self._trim(self._post_tokens)
+            return allowed
+
+    def reserve(self, *, address: str, client_ip: str) -> str | None:
+        """Reserve one payout or return the reason it is refused."""
+
+        with self._lock:
+            now = self._clock()
+            if self._address_until.get(address, 0.0) > now:
+                return "address recently funded"
+            if self._ip_until.get(client_ip, 0.0) > now:
+                return "client recently funded"
+            self._recent = [stamp for stamp in self._recent if stamp > now - 3600.0]
+            if len(self._recent) >= self.max_dispenses_per_hour:
+                return "faucet hourly limit reached"
+            self._recent.append(now)
+            self._address_until[address] = now + self.address_cooldown_seconds
+            self._ip_until[client_ip] = now + self.ip_cooldown_seconds
+            self._trim(self._address_until)
+            self._trim(self._ip_until)
+            return None
+
+    def release(self, *, address: str, client_ip: str) -> None:
+        """Undo a reservation whose payout was not accepted."""
+
+        with self._lock:
+            self._address_until.pop(address, None)
+            self._ip_until.pop(client_ip, None)
+            if self._recent:
+                self._recent.pop()
+
+    def _trim(self, table: OrderedDict[str, Any]) -> None:
+        while len(table) > self.max_tracked_keys:
+            table.popitem(last=False)
+
+
+class FaucetChallenge:
+    """Stateless, HMAC-signed hashcash challenges bound to the recipient address."""
+
+    def __init__(
+        self,
+        bits: int = DEFAULT_FAUCET_POW_BITS,
+        *,
+        ttl_seconds: float = FAUCET_CHALLENGE_TTL_SECONDS,
+        secret: bytes | None = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        if not 1 <= bits <= 32:
+            raise TestnetOpsError("faucet pow bits must be in [1, 32]")
+        self.bits = bits
+        self.ttl_seconds = ttl_seconds
+        self._secret = os.urandom(32) if secret is None else secret
+        self._clock = clock
+        self._lock = Lock()
+        self._used: OrderedDict[bytes, float] = OrderedDict()
+
+    def issue(self) -> dict[str, object]:
+        expires_at = int(self._clock() + self.ttl_seconds)
+        body = expires_at.to_bytes(8, "big") + os.urandom(16)
+        token = body + self._mac(body)
+        return {"bits": self.bits, "challenge": token.hex(), "expires_at": expires_at}
+
+    def verify(self, *, challenge: object, solution: object, address: str) -> str | None:
+        if not isinstance(challenge, str) or not isinstance(solution, str):
+            return "challenge and solution are required"
+        try:
+            token = bytes.fromhex(challenge)
+            nonce = bytes.fromhex(solution)
+        except ValueError:
+            return "challenge and solution must be hex"
+        if len(token) != 40 or not 1 <= len(nonce) <= 32:
+            return "malformed challenge"
+        body, mac = token[:24], token[24:]
+        if not hmac.compare_digest(mac, self._mac(body)):
+            return "invalid challenge"
+        now = self._clock()
+        if int.from_bytes(body[:8], "big") < now:
+            return "challenge expired"
+        digest = blake3(FAUCET_CHALLENGE_DOMAIN + token + address.encode() + nonce).digest()
+        if _leading_zero_bits(digest) < self.bits:
+            return "insufficient work"
+        with self._lock:
+            for used_token, expiry in list(self._used.items()):
+                if expiry >= now:
+                    break
+                del self._used[used_token]
+            if token in self._used:
+                return "challenge already used"
+            self._used[token] = float(int.from_bytes(body[:8], "big"))
+        return None
+
+    def _mac(self, body: bytes) -> bytes:
+        return hmac.new(self._secret, body, sha256).digest()[:16]
+
+
+def solve_faucet_challenge(challenge: str, bits: int, address: str) -> str:
+    """Find a solution for a faucet challenge (client helper and tests)."""
+
+    token = bytes.fromhex(challenge)
+    prefix = FAUCET_CHALLENGE_DOMAIN + token + address.encode()
+    counter = 0
+    while True:
+        nonce = counter.to_bytes(8, "big")
+        if _leading_zero_bits(blake3(prefix + nonce).digest()) >= bits:
+            return nonce.hex()
+        counter += 1
+
+
+def _leading_zero_bits(digest: bytes) -> int:
+    value = int.from_bytes(digest, "big")
+    return len(digest) * 8 - value.bit_length()
+
+
 class TestnetHttpServer(ThreadingHTTPServer):
     """Minimal public testnet faucet/explorer HTTP surface."""
 
@@ -273,10 +479,44 @@ class TestnetHttpServer(ThreadingHTTPServer):
         rpc_url: str,
         *,
         faucet_state: FaucetState | None = None,
+        limiter: FaucetLimiter | None = None,
+        challenge: FaucetChallenge | None = None,
+        max_connections: int = TESTNET_HTTP_MAX_CONNECTIONS,
     ) -> None:
         super().__init__(address, _TestnetHttpHandler)
         self.rpc_url = _require_rpc_url(rpc_url)
         self.faucet_state = faucet_state
+        self.limiter = FaucetLimiter() if limiter is None else limiter
+        self.challenge = challenge
+        self._connection_slots = BoundedSemaphore(_positive_int("max_connections", max_connections))
+
+    def process_request(
+        self,
+        request: socket.socket | tuple[bytes, socket.socket],
+        client_address: object,
+    ) -> None:
+        """Refuse new connections once every slot is busy instead of spawning threads."""
+
+        if not self._connection_slots.acquire(blocking=False):
+            if isinstance(request, socket.socket):
+                with contextlib.suppress(OSError):
+                    request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(
+        self,
+        request: socket.socket | tuple[bytes, socket.socket],
+        client_address: object,
+    ) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
 
 
 def create_testnet_http_server(
@@ -285,19 +525,36 @@ def create_testnet_http_server(
     port: int = 28380,
     rpc_url: str = DEFAULT_TESTNET_RPC_URL,
     faucet_state: FaucetState | None = None,
+    limiter: FaucetLimiter | None = None,
+    challenge: FaucetChallenge | None = None,
+    max_connections: int = TESTNET_HTTP_MAX_CONNECTIONS,
 ) -> TestnetHttpServer:
     """Create the public testnet helper HTTP server without starting it."""
 
-    return TestnetHttpServer((host, port), rpc_url, faucet_state=faucet_state)
+    return TestnetHttpServer(
+        (host, port),
+        rpc_url,
+        faucet_state=faucet_state,
+        limiter=limiter,
+        challenge=challenge,
+        max_connections=max_connections,
+    )
 
 
 class _TestnetHttpHandler(BaseHTTPRequestHandler):
     server_version = "TensorPoWTestnet"
     protocol_version = "HTTP/1.1"
+    timeout = TESTNET_HTTP_TIMEOUT_SECONDS
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         server = cast(TestnetHttpServer, self.server)
+        if parsed.path == "/faucet/challenge":
+            if server.challenge is None:
+                self._send_json({"bits": 0, "challenge": None})
+                return
+            self._send_json(server.challenge.issue())
+            return
         if parsed.path == "/health":
             self._send_json({"chain_id": GENESIS_CHAIN_ID_TESTNET, "healthy": True})
             return
@@ -340,6 +597,10 @@ class _TestnetHttpHandler(BaseHTTPRequestHandler):
         if parsed.path != "/faucet":
             self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
             return
+        client_ip = str(self.client_address[0])
+        if not server.limiter.allow_post(client_ip):
+            self._send_json({"error": "rate limited"}, status=HTTPStatus.TOO_MANY_REQUESTS)
+            return
         body = self._read_json_body()
         if body is None:
             return
@@ -352,15 +613,31 @@ class _TestnetHttpHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "invalid address"}, status=HTTPStatus.BAD_REQUEST)
             return
         if server.faucet_state is not None:
+            if server.challenge is not None:
+                problem = server.challenge.verify(
+                    challenge=body.get("challenge"),
+                    solution=body.get("solution"),
+                    address=address,
+                )
+                if problem is not None:
+                    self._send_json({"error": problem}, status=HTTPStatus.FORBIDDEN)
+                    return
+            refusal = server.limiter.reserve(address=address, client_ip=client_ip)
+            if refusal is not None:
+                self._send_json({"error": refusal}, status=HTTPStatus.TOO_MANY_REQUESTS)
+                return
             try:
-                self._send_json(
-                    server.faucet_state.dispense(
-                        recipient_address=address,
-                        rpc_url=server.rpc_url,
-                    )
+                result = server.faucet_state.dispense(
+                    recipient_address=address,
+                    rpc_url=server.rpc_url,
                 )
             except (OSError, ValueError, TestnetOpsError) as exc:
+                server.limiter.release(address=address, client_ip=client_ip)
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if result.get("accepted") is not True:
+                server.limiter.release(address=address, client_ip=client_ip)
+            self._send_json(result)
             return
         self._send_json(
             {
@@ -395,6 +672,10 @@ class _TestnetHttpHandler(BaseHTTPRequestHandler):
             return None
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except TimeoutError:
+            self.close_connection = True
+            self._send_json({"error": "request timeout"}, status=HTTPStatus.REQUEST_TIMEOUT)
+            return None
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._send_json({"error": "invalid json"}, status=HTTPStatus.BAD_REQUEST)
             return None

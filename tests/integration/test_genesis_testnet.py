@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import http.client
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from http import HTTPStatus
 from pathlib import Path
@@ -1772,3 +1774,169 @@ def test_faucet_tx_reads_password_from_environment_not_argv(
         run_testnet_ops([*base, "--password", "hunter2"])
     monkeypatch.delenv(testnet_ops.DEFAULT_FAUCET_PASSWORD_ENV, raising=False)
     assert run_testnet_ops(base) == 1
+
+
+@contextmanager
+def _faucet_servers(
+    tmp_path: Path,
+    *,
+    utxo_count: int,
+    limiter: testnet_ops.FaucetLimiter | None = None,
+    challenge: testnet_ops.FaucetChallenge | None = None,
+) -> Iterator[int]:
+    wallet = Wallet.recover("57" * 32)
+    wallet_path = wallet.save(tmp_path / "faucet.json", "pw")
+    utxos = tuple(
+        UTXO(
+            outpoint=Outpoint(bytes([0x80 + index]) * 32, 0),
+            amount_matoms=1_000,
+            template_id=TEMPLATE_PKH,
+            owner_pubkey_hash=wallet.pubkey_hash(),
+            payload=wallet.pubkey_hash(),
+        )
+        for index in range(utxo_count)
+    )
+    utxo_path = tmp_path / "utxos.json"
+    utxo_path.write_text(utxos_to_json(utxos) + "\n", encoding="utf-8")
+    rpc_http = create_http_server(
+        rpc_server=JsonRpcServer(InMemoryRpcBackend(utxo_set=UTXOSet(utxos))), port=0
+    )
+    rpc_thread = Thread(target=rpc_http.serve_forever, daemon=True)
+    rpc_thread.start()
+    testnet_http = create_testnet_http_server(
+        port=0,
+        rpc_url=f"http://127.0.0.1:{int(rpc_http.server_address[1])}/rpc",
+        faucet_state=FaucetState(
+            wallet=Wallet.load(wallet_path, "pw"),
+            utxos_path=utxo_path,
+            amount_matoms=100,
+            fee_matoms=100,
+        ),
+        limiter=limiter,
+        challenge=challenge,
+    )
+    testnet_thread = Thread(target=testnet_http.serve_forever, daemon=True)
+    testnet_thread.start()
+    try:
+        yield int(testnet_http.server_address[1])
+    finally:
+        testnet_http.shutdown()
+        testnet_http.server_close()
+        testnet_thread.join(timeout=5)
+        rpc_http.shutdown()
+        rpc_http.server_close()
+        rpc_thread.join(timeout=5)
+
+
+def test_faucet_enforces_address_and_ip_cooldowns(tmp_path: Path) -> None:
+    """M-8: one address / one client cannot drain the faucet in a loop."""
+
+    first = Wallet.recover("68" * 32).address
+    second = Wallet.recover("69" * 32).address
+    with _faucet_servers(tmp_path, utxo_count=3) as port:
+        ok_status, ok_payload = _post_raw(
+            port, "/faucet", json.dumps({"address": first}).encode("utf-8")
+        )
+        again_status, again_payload = _post_raw(
+            port, "/faucet", json.dumps({"address": first}).encode("utf-8")
+        )
+        other_status, other_payload = _post_raw(
+            port, "/faucet", json.dumps({"address": second}).encode("utf-8")
+        )
+
+    assert ok_status == HTTPStatus.OK
+    assert ok_payload["accepted"] is True
+    assert again_status == HTTPStatus.TOO_MANY_REQUESTS
+    assert again_payload == {"error": "address recently funded"}
+    assert other_status == HTTPStatus.TOO_MANY_REQUESTS
+    assert other_payload == {"error": "client recently funded"}
+
+
+def test_faucet_challenge_is_required_bound_and_single_use(tmp_path: Path) -> None:
+    address = Wallet.recover("6a" * 32).address
+    other = Wallet.recover("6b" * 32).address
+    challenge = testnet_ops.FaucetChallenge(8)
+    limiter = testnet_ops.FaucetLimiter(address_cooldown_seconds=0, ip_cooldown_seconds=0)
+    with _faucet_servers(tmp_path, utxo_count=3, limiter=limiter, challenge=challenge) as port:
+        missing_status, missing = _post_raw(
+            port, "/faucet", json.dumps({"address": address}).encode("utf-8")
+        )
+        issued = _get_json(port, "/faucet/challenge")
+        token = str(issued["challenge"])
+        solution = testnet_ops.solve_faucet_challenge(token, int(str(issued["bits"])), address)
+        wrong_address_status, _ = _post_raw(
+            port,
+            "/faucet",
+            json.dumps({"address": other, "challenge": token, "solution": solution}).encode(),
+        )
+        ok_status, ok_payload = _post_raw(
+            port,
+            "/faucet",
+            json.dumps({"address": address, "challenge": token, "solution": solution}).encode(),
+        )
+        replay_status, replay = _post_raw(
+            port,
+            "/faucet",
+            json.dumps({"address": address, "challenge": token, "solution": solution}).encode(),
+        )
+
+    assert missing_status == HTTPStatus.FORBIDDEN
+    assert missing == {"error": "challenge and solution are required"}
+    assert wrong_address_status == HTTPStatus.FORBIDDEN
+    assert ok_status == HTTPStatus.OK
+    assert ok_payload["accepted"] is True
+    assert replay_status == HTTPStatus.FORBIDDEN
+    assert replay == {"error": "challenge already used"}
+
+
+def test_faucet_limiter_global_cap_and_post_throttle() -> None:
+    now = [1_000.0]
+    limiter = testnet_ops.FaucetLimiter(
+        address_cooldown_seconds=0,
+        ip_cooldown_seconds=0,
+        max_dispenses_per_hour=2,
+        post_rate_per_second=1.0,
+        post_burst=2,
+        clock=lambda: now[0],
+    )
+    assert limiter.reserve(address="a", client_ip="1") is None
+    assert limiter.reserve(address="b", client_ip="2") is None
+    assert limiter.reserve(address="c", client_ip="3") == "faucet hourly limit reached"
+    now[0] += 3_601
+    assert limiter.reserve(address="c", client_ip="3") is None
+
+    assert limiter.allow_post("9.9.9.9")
+    assert limiter.allow_post("9.9.9.9")
+    assert not limiter.allow_post("9.9.9.9")
+    now[0] += 1.5
+    assert limiter.allow_post("9.9.9.9")
+
+
+def test_faucet_http_has_read_timeout_and_connection_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import socket
+
+    monkeypatch.setattr(testnet_ops._TestnetHttpHandler, "timeout", 0.2)
+    testnet_http = create_testnet_http_server(port=0, max_connections=1)
+    thread = Thread(target=testnet_http.serve_forever, daemon=True)
+    thread.start()
+    port = int(testnet_http.server_address[1])
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as slow:
+            slow.sendall(b"POST /faucet HTTP/1.1\r\nHost: x\r\n")
+            slow.settimeout(5)
+            assert slow.recv(1024) == b""
+
+        left, right = socket.socketpair()
+        assert testnet_http._connection_slots.acquire(blocking=False)
+        try:
+            testnet_http.process_request(left, ("127.0.0.1", 1))
+            assert left.fileno() == -1
+        finally:
+            testnet_http._connection_slots.release()
+            right.close()
+    finally:
+        testnet_http.shutdown()
+        testnet_http.server_close()
+        thread.join(timeout=5)
