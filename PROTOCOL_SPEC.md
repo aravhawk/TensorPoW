@@ -271,7 +271,7 @@ Fruit body byte layout:
 
 The first transaction MUST be a coinbase transaction for the fruit miner. All
 other transactions MUST be valid non-coinbase transactions assigned to the
-fruit's `shard_id`. `tx_merkle_root` is the Merkle root of transaction IDs in
+fruit's `shard_id`. `tx_merkle_root` is the Merkle root of transaction witness IDs (`wtx_id`) in
 body order. Empty transaction bodies are invalid because the coinbase is
 mandatory.
 
@@ -596,8 +596,15 @@ can identify one, but error-location reporting is not consensus critical.
 Transaction ID:
 
 ```text
-tx_id = BLAKE3(DOMAIN_TX_ID || canonical_tx_bytes)
+tx_id = BLAKE3(DOMAIN_TX_ID || canonical_tx_bytes_with_empty_witnesses)
+wtx_id = BLAKE3(DOMAIN_TX_WITNESS_ID || canonical_tx_bytes)
 ```
+
+`tx_id` excludes witnesses, so no party (including a signer or multisig co-signer)
+can change a transaction's id, outpoints or shard route after the spend is fixed.
+`wtx_id` covers the full bytes and is used for the fruit `tx_merkle_root` and for
+compact relay, so fruits still commit to the exact witnesses they carry. Shard
+routing, outpoints, mempool identity and duplicate detection use `tx_id`.
 
 Signature hash:
 
@@ -1163,6 +1170,7 @@ roots.
 | `DOMAIN_TX_SIGHASH` | `0x21` | Transaction signature hash domain. |
 | `DOMAIN_OUTPOINT` | `0x22` | Outpoint key domain. |
 | `DOMAIN_UTXO` | `0x23` | UTXO value hash domain. |
+| `DOMAIN_TX_WITNESS_ID` | `0x24` | Transaction witness ID domain. |
 | `DOMAIN_MERKLE_LEAF` | `0x30` | Merkle leaf domain. |
 | `DOMAIN_MERKLE_NODE` | `0x31` | Merkle internal node domain. |
 | `DOMAIN_MERKLE_EMPTY` | `0x32` | Empty subtree domain. |

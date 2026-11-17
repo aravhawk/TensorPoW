@@ -10,6 +10,7 @@ from tensorpow.chain.blocks import (
     parent_candidate_root,
     tx_id,
     tx_merkle_root,
+    wtx_id,
 )
 from tensorpow.chain.headers import AnchorHeader, FruitHeader
 from tensorpow.chain.merkle import ordered_merkle_root
@@ -27,4 +28,5 @@ __all__ = [
     "parent_candidate_root",
     "tx_id",
     "tx_merkle_root",
+    "wtx_id",
 ]

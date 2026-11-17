@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from tensorpow.chain.blocks import tx_id as blocks_tx_id
+from tensorpow.chain.blocks import tx_merkle_root
 from tensorpow.crypto.hash import DOMAIN_TX_SIGHASH, domain_hash
 from tensorpow.crypto.signatures import SIG_TYPE_ML_DSA_RESERVED
 from tensorpow.state.utxo import TEMPLATE_HASHLOCK, TEMPLATE_MULTISIG, TEMPLATE_PKH, Outpoint
@@ -24,7 +26,7 @@ TX_BYTES_HEX = (
     "0000000000000a000000000000000b0000000000000020000909090909090909090909"
     "090909090909090909090909090909090909090909"
 )
-TX_ID_HEX = "3082fbd5faaf071a6924ea9e78dd1bd75abf46af59ca5c3c7dbcbd1fbab261ed"
+TX_ID_HEX = "1f20b4fe8997ef8d2c965f622b76a75a0789a0842635c8a2c47022290dd6f495"
 SIGHASH_HEX = "46ba49203f41cb40a789f0661e5e748f4f273c92e08d340fdd53ee12feb3ffbd"
 INPUT_BYTES_HEX = (
     "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f07000000ffffffff02000102"
@@ -99,7 +101,11 @@ def test_sighash_uses_empty_witnesses_and_checks_index() -> None:
         outputs=tx.outputs,
     )
 
-    assert changed_witness.tx_id() != tx.tx_id()
+    # L-4: witnesses do not affect the txid (or shard route), only the witness id.
+    assert changed_witness.tx_id() == tx.tx_id()
+    assert changed_witness.wtx_id() != tx.wtx_id()
+    assert tx_merkle_root((changed_witness.to_bytes(),)) != tx_merkle_root((tx.to_bytes(),))
+    assert blocks_tx_id(changed_witness.to_bytes()) == tx.tx_id()
     assert changed_witness.sighash(0, (5,)) == tx.sighash(0, (5,))
     assert tx.without_witnesses().inputs[0].witness == b""
     with pytest.raises(IndexError):

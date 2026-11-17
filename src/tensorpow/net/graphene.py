@@ -9,7 +9,7 @@ from typing import Final
 from blake3 import blake3
 
 from tensorpow._iblt import peel_iblt_cells
-from tensorpow.chain.blocks import Fruit, tx_id
+from tensorpow.chain.blocks import Fruit, wtx_id
 from tensorpow.chain.headers import FruitHeader
 from tensorpow.crypto.hash import HASH_LEN_BYTES
 from tensorpow.mempool.mempool import Mempool, MempoolEntry
@@ -79,7 +79,7 @@ def announce_fruit(fruit: Fruit) -> bytes:
         raise ValueError("fruit transaction count exceeds uint16")
 
     header_bytes = fruit.header.serialize()
-    transaction_ids = tuple(tx_id(tx) for tx in fruit.transactions)
+    transaction_ids = tuple(wtx_id(tx) for tx in fruit.transactions)
     if len(set(transaction_ids)) != len(transaction_ids):
         raise ValueError("fruit transactions must have unique tx_ids")
 
@@ -262,9 +262,10 @@ def _matching_mempool_candidates(
 
 def _candidate_from_entry(entry: MempoolEntry) -> _CandidateTx | None:
     raw_tx = entry.tx.to_bytes()
-    if len(entry.tx_id) != HASH_LEN_BYTES or tx_id(raw_tx) != entry.tx_id:
+    if len(entry.tx_id) != HASH_LEN_BYTES or entry.tx.tx_id() != entry.tx_id:
         return None
-    return _CandidateTx(tx_id=entry.tx_id, raw_tx=raw_tx)
+    # Relay identifies exact bytes, so candidates are keyed by witness id.
+    return _CandidateTx(tx_id=wtx_id(raw_tx), raw_tx=raw_tx)
 
 
 def _decode_iblt_difference(

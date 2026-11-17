@@ -6,7 +6,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
-from tensorpow.crypto.hash import DOMAIN_TX_ID, DOMAIN_TX_SIGHASH, HASH_LEN_BYTES, domain_hash
+from tensorpow.crypto.hash import (
+    DOMAIN_TX_ID,
+    DOMAIN_TX_SIGHASH,
+    DOMAIN_TX_WITNESS_ID,
+    HASH_LEN_BYTES,
+    domain_hash,
+)
 from tensorpow.crypto.signatures import ED25519_PUBLIC_KEY_BYTES, SIG_TYPE_ED25519
 from tensorpow.state.utxo import (
     ACTIVE_TEMPLATES,
@@ -233,9 +239,23 @@ class Transaction:
     serialize = to_bytes
 
     def tx_id(self) -> bytes:
-        """Return `BLAKE3(DOMAIN_TX_ID || canonical_tx_bytes)`."""
+        """Return `BLAKE3(DOMAIN_TX_ID || canonical_tx_bytes_with_empty_witnesses)`.
 
-        return domain_hash(DOMAIN_TX_ID, self.to_bytes())
+        Witnesses are excluded so that nobody, including a signer or multisig
+        co-signer, can change a transaction's id (and so its shard route) after
+        the spend is fixed.
+        """
+
+        return domain_hash(DOMAIN_TX_ID, self._to_bytes(empty_witnesses=True))
+
+    def wtx_id(self) -> bytes:
+        """Return `BLAKE3(DOMAIN_TX_WITNESS_ID || canonical_tx_bytes)`.
+
+        Covers the witnesses; used for the fruit transaction Merkle root and for relay
+        so blocks still commit to the exact bytes they carry.
+        """
+
+        return domain_hash(DOMAIN_TX_WITNESS_ID, self.to_bytes())
 
     def sighash(self, input_index: int, spent_amounts: Sequence[int]) -> bytes:
         """Return the section-10 signature hash for one input.

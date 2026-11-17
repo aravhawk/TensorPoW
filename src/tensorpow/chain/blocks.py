@@ -17,8 +17,8 @@ from tensorpow.crypto.hash import (
     DOMAIN_FRUIT_SET_ROOT,
     DOMAIN_PARENT_CANDIDATE_ROOT,
     DOMAIN_SHARD_TREE,
-    DOMAIN_TX_ID,
     DOMAIN_TX_MERKLE_ROOT,
+    DOMAIN_TX_WITNESS_ID,
     HASH_LEN_BYTES,
     domain_hash,
     hash_bytes,
@@ -26,7 +26,7 @@ from tensorpow.crypto.hash import (
 from tensorpow.mempool.shard_tree import ROOT_SHARD_ID, ShardTree
 from tensorpow.pow.challenge import U16_MAX, U32_MAX, U64_MAX
 from tensorpow.state.utxo import EMPTY_UTXO_ROOT
-from tensorpow.tx.transaction import Output, TxDecodeError
+from tensorpow.tx.transaction import Output, Transaction, TxDecodeError
 
 MAX_FRUIT_PAYLOAD_BYTES: Final[int] = 8192
 MIN_FRUIT_TX_COUNT: Final[int] = 1
@@ -239,11 +239,24 @@ class Anchor:
 
 
 def tx_id(tx_bytes: bytes) -> bytes:
-    return domain_hash(DOMAIN_TX_ID, _require_bytes("tx_bytes", tx_bytes))
+    """Return the witness-independent transaction id of canonical ``tx_bytes``."""
+
+    try:
+        return Transaction.from_bytes(_require_bytes("tx_bytes", tx_bytes)).tx_id()
+    except TxDecodeError as exc:
+        raise ValueError(f"tx_bytes are not a canonical transaction: {exc}") from exc
+
+
+def wtx_id(tx_bytes: bytes) -> bytes:
+    """Return `BLAKE3(DOMAIN_TX_WITNESS_ID || tx_bytes)`, committing to witnesses."""
+
+    return domain_hash(DOMAIN_TX_WITNESS_ID, _require_bytes("tx_bytes", tx_bytes))
 
 
 def tx_merkle_root(transactions: tuple[bytes, ...]) -> bytes:
-    return ordered_merkle_root(DOMAIN_TX_MERKLE_ROOT, tuple(tx_id(tx) for tx in transactions))
+    """Ordered Merkle root of the fruit's witness ids, so witnesses stay committed."""
+
+    return ordered_merkle_root(DOMAIN_TX_MERKLE_ROOT, tuple(wtx_id(tx) for tx in transactions))
 
 
 def fruit_payload_size_bytes(transactions: tuple[bytes, ...]) -> int:

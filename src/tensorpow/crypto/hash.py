@@ -24,6 +24,7 @@ DOMAIN_TX_ID: Final[int] = 0x20
 DOMAIN_TX_SIGHASH: Final[int] = 0x21
 DOMAIN_OUTPOINT: Final[int] = 0x22
 DOMAIN_UTXO: Final[int] = 0x23
+DOMAIN_TX_WITNESS_ID: Final[int] = 0x24
 DOMAIN_MERKLE_LEAF: Final[int] = 0x30
 DOMAIN_MERKLE_NODE: Final[int] = 0x31
 DOMAIN_MERKLE_EMPTY: Final[int] = 0x32
