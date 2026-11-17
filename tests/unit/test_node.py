@@ -24,6 +24,7 @@ from tensorpow.consensus.anchor_daa import ANCHOR_INITIAL_TARGET_LE, AnchorRecor
 from tensorpow.consensus.ghostdag import DYNAMIC_K_MIN
 from tensorpow.consensus.rewards import (
     coinbase_maturity_height,
+    fruit_coinbase_outpoint_tx_id,
     interval_subsidy_matoms,
     reward_pools,
 )
@@ -79,7 +80,7 @@ def test_process_fruit_updates_utxo_and_rejects_bad_payloads(tmp_path: Path) -> 
     assert anchored.accepted
     assert accepted.object_hash == fruit.block_hash()
     assert node.get_block(fruit.block_hash()) == fruit.serialize()
-    assert node.utxo_set.get(Outpoint(tx.tx_id(), 0)) is not None
+    assert node.utxo_set.get(_coinbase_outpoint(fruit)) is not None
     assert node.process_fruit_bytes(fruit.serialize()[:-1]).reason == "malformed_fruit"
 
     bad_fruit = bytearray(fruit.serialize())
@@ -437,7 +438,9 @@ def test_anchor_reward_overclaim_is_rejected(tmp_path: Path) -> None:
     node.close()
 
 
-def test_duplicate_coinbase_outpoints_reject_deterministically(tmp_path: Path) -> None:
+def test_identical_coinbases_get_distinct_fruit_bound_outpoints(tmp_path: Path) -> None:
+    """H-2: identical coinbases no longer collide, so neither can grief the other."""
+
     node = _node(tmp_path / "node")
     genesis = _genesis_anchor()
     coinbase = _coinbase_tx(16)
@@ -463,8 +466,79 @@ def test_duplicate_coinbase_outpoints_reject_deterministically(tmp_path: Path) -
     assert node.process_anchor(genesis)
     assert node.process_fruit(first)
     assert node.process_fruit(second)
-    assert node.process_anchor(anchor).reason == "duplicate_coinbase_outpoint"
+    assert node.process_anchor(anchor).accepted
+    assert _coinbase_outpoint(first) != _coinbase_outpoint(second)
+    assert node.utxo_set.get(_coinbase_outpoint(first)) is not None
+    assert node.utxo_set.get(_coinbase_outpoint(second)) is not None
+    assert node.utxo_set.get(Outpoint(coinbase.tx_id(), 0)) is None
     node.close()
+
+
+def test_spend_of_coinbase_cannot_be_replayed_after_identical_coinbase(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H-2: a recreated identical coinbase must not revive an already-signed spend."""
+
+    monkeypatch.setattr(rewards_module, "COINBASE_MATURITY_ANCHORS", 1)
+    node = _node(tmp_path / "node")
+    miner = Wallet.recover("57" * 32)
+    victim = Wallet.recover("58" * 32)
+    genesis = _genesis_anchor()
+    reused = Transaction.coinbase((Output(10_000, TEMPLATE_PKH, payload=miner.pubkey_hash()),))
+    try:
+        assert node.process_anchor(genesis)
+        first = _fruit((reused.to_bytes(),), latest_anchor=genesis.block_hash(), nonce=60)
+        assert node.process_fruit(first)
+        first_anchor = _anchor(first.block_hash(), parent_anchor=genesis.block_hash())
+        assert node.process_anchor(first_anchor)
+
+        (coinbase_utxo,) = node.utxo_set.by_owner(miner.pubkey_hash())
+        spend = miner.create_signed_transaction(
+            utxos=(coinbase_utxo,),
+            recipient_address=victim.address,
+            amount_matoms=9_000,
+            fee_matoms=1_000,
+            current_height=coinbase_utxo.lockheight,
+        )
+        spending = _fruit(
+            (_coinbase_tx(61).to_bytes(), spend.to_bytes()),
+            latest_anchor=first_anchor.block_hash(),
+            parent_selected=first.block_hash(),
+            timestamp_ms=3,
+            nonce=61,
+        )
+        assert node.process_fruit(spending).accepted
+        spending_anchor = _anchor(
+            spending.block_hash(), parent_anchor=first_anchor.block_hash(), timestamp_ms=4
+        )
+        assert node.process_anchor(spending_anchor).accepted
+        assert len(node.utxo_set.by_owner(victim.pubkey_hash())) == 1
+
+        recreated = _fruit(
+            (reused.to_bytes(),),
+            latest_anchor=spending_anchor.block_hash(),
+            parent_selected=spending.block_hash(),
+            timestamp_ms=5,
+            nonce=62,
+        )
+        assert node.process_fruit(recreated).accepted
+        recreated_anchor = _anchor(
+            recreated.block_hash(), parent_anchor=spending_anchor.block_hash(), timestamp_ms=6
+        )
+        assert node.process_anchor(recreated_anchor).accepted
+
+        replay = _fruit(
+            (_coinbase_tx(63).to_bytes(), spend.to_bytes()),
+            latest_anchor=recreated_anchor.block_hash(),
+            parent_selected=recreated.block_hash(),
+            timestamp_ms=7,
+            nonce=63,
+        )
+        assert node.process_fruit(replay).reason == "missing_input"
+        assert len(node.utxo_set.by_owner(victim.pubkey_hash())) == 1
+    finally:
+        node.close()
 
 
 def test_coinbase_matures_at_covering_anchor_height(
@@ -498,7 +572,7 @@ def test_coinbase_matures_at_covering_anchor_height(
     assert node.process_fruit(first_fruit).accepted
     assert node.process_anchor(first_anchor).accepted
 
-    coinbase_outpoint = Outpoint(coinbase.tx_id(), 0)
+    coinbase_outpoint = _coinbase_outpoint(first_fruit)
     coinbase_utxo = node.utxo_set.get(coinbase_outpoint)
     assert coinbase_utxo is not None
     assert coinbase_utxo.lockheight == coinbase_maturity_height(1)
@@ -912,7 +986,7 @@ def test_higher_work_side_branch_reorgs_active_utxo_state(tmp_path: Path) -> Non
     assert node.process_anchor(genesis)
     assert node.process_fruit(old_fruit)
     assert node.process_anchor(old_anchor)
-    assert node.utxo_set.get(Outpoint(old_coinbase.tx_id(), 0)) is not None
+    assert node.utxo_set.get(_coinbase_outpoint(old_fruit)) is not None
 
     assert node.process_fruit(side_fruit)
     assert node.process_anchor(side_anchor)
@@ -920,9 +994,9 @@ def test_higher_work_side_branch_reorgs_active_utxo_state(tmp_path: Path) -> Non
     assert node.process_anchor(side_child_anchor)
 
     assert node._anchor_height() == 2
-    assert node.utxo_set.get(Outpoint(old_coinbase.tx_id(), 0)) is None
-    assert node.utxo_set.get(Outpoint(side_coinbase.tx_id(), 0)) is not None
-    assert node.utxo_set.get(Outpoint(side_child_coinbase.tx_id(), 0)) is not None
+    assert node.utxo_set.get(_coinbase_outpoint(old_fruit)) is None
+    assert node.utxo_set.get(_coinbase_outpoint(side_fruit)) is not None
+    assert node.utxo_set.get(_coinbase_outpoint(side_child_fruit)) is not None
     node.close()
 
 
@@ -1014,7 +1088,7 @@ def test_anchor_persistence_failure_does_not_mutate_memory(
         node.process_anchor(anchor)
     assert node.status() == before_status
     assert node.get_block(anchor.block_hash()) is None
-    assert node.utxo_set.get(Outpoint(tx.tx_id(), 0)) is None
+    assert node.utxo_set.get(_coinbase_outpoint(fruit)) is None
     node.close()
 
 
@@ -1083,6 +1157,10 @@ def test_rebuild_mempool_prunes_persisted_invalid_rows(tmp_path: Path) -> None:
     assert node.get_tx(spend.tx_id()) is None
     assert node.store.get(COLUMN_MEMPOOL, spend.tx_id()) is None
     node.close()
+
+
+def _coinbase_outpoint(fruit: Fruit, index: int = 0) -> Outpoint:
+    return Outpoint(fruit_coinbase_outpoint_tx_id(fruit.block_hash()), index)
 
 
 def _coinbase_tx(seed: int) -> Transaction:

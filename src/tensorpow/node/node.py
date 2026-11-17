@@ -34,12 +34,14 @@ from tensorpow.consensus.finality import (
 )
 from tensorpow.consensus.ghostdag import DYNAMIC_K_MIN, BlockDAG
 from tensorpow.consensus.rewards import (
+    anchor_reward_outpoint_tx_id,
     coinbase_maturity_height,
+    fruit_coinbase_outpoint_tx_id,
     fruit_subsidy_assignments,
     interval_subsidy_matoms,
     reward_pools,
 )
-from tensorpow.crypto.hash import HASH_LEN_BYTES, hash_bytes
+from tensorpow.crypto.hash import HASH_LEN_BYTES
 from tensorpow.genesis import GENESIS_CHAIN_ID_MAINNET, GENESIS_CHAIN_ID_TESTNET
 from tensorpow.mempool import (
     BYTES_PER_KB,
@@ -88,7 +90,6 @@ FRUIT_META_BYTES: Final[int] = U64_BYTES * 2
 MAX_FUTURE_DRIFT_MS: Final[int] = 120_000
 MEDIAN_TIME_PAST_WINDOW: Final[int] = 11
 ANCHOR_HISTORY_LOOKBACK: Final[int] = max(WTEMA_WINDOW_ANCHORS + 1, MEDIAN_TIME_PAST_WINDOW)
-ANCHOR_REWARD_PREFIX: Final[bytes] = b"anchorreward:"
 ANCHOR_META_PREFIX: Final[bytes] = b"anchormeta:"
 U256_BYTES: Final[int] = 32
 ANCHOR_META_BYTES: Final[int] = U64_BYTES + HASH_LEN_BYTES + U256_BYTES
@@ -402,8 +403,10 @@ class TensorPowNode:
                     return NodeResult.reject(result)
                 tip_sum += tip_matoms
                 for output_index, _output in enumerate(tx.outputs):
-                    utxo = _utxo_from_output(tx, output_index)
-                    validation_view.add(utxo)
+                    try:
+                        validation_view.add(_utxo_from_output(tx, output_index))
+                    except (KeyError, ValueError):
+                        return NodeResult.reject("duplicate_tx_outpoint")
 
             try:
                 coinbase_claim = _tx_output_sum(txs[0])
@@ -727,6 +730,7 @@ class TensorPowNode:
                 shard_tree=state.shard_tree,
                 fee_floors=state.fee_floors,
                 validation_anchor_height=anchor_height,
+                confirmed_tx_ids=state.confirmed_tx_ids,
             )
         )
         if apply_result is not None:
@@ -882,6 +886,7 @@ class TensorPowNode:
         shard_tree: ShardTree,
         fee_floors: Mapping[int, int],
         validation_anchor_height: int,
+        confirmed_tx_ids: set[bytes],
     ) -> tuple[
         str | None, tuple[Outpoint, ...], tuple[UTXO, ...], dict[bytes, int], tuple[bytes, ...]
     ]:
@@ -905,6 +910,10 @@ class TensorPowNode:
                 return "malformed_fruit_tx", (), (), {}, ()
             for tx in txs[1:]:
                 tx_id = tx.tx_id()
+                if tx_id in confirmed_tx_ids or tx_id in covered_tx_ids:
+                    # A transaction is applied at most once per branch. Concurrent fruits may
+                    # legitimately carry the same mempool transaction; later copies are inert.
+                    continue
                 covered_tx_ids.add(tx_id)
                 if any(
                     input_.previous_outpoint in spent_outpoints
@@ -1197,6 +1206,7 @@ class TensorPowNode:
                     coinbase,
                     output_index,
                     min_lockheight=maturity_height,
+                    outpoint_tx_id=fruit_coinbase_outpoint_tx_id(fruit_hash),
                 )
                 if utxo.outpoint in seen_reward_outpoints or staged.get(utxo.outpoint) is not None:
                     return "duplicate_coinbase_outpoint", (), 0, ()
@@ -1465,11 +1475,12 @@ def _utxo_from_output(
     output_index: int,
     *,
     min_lockheight: int = 0,
+    outpoint_tx_id: bytes | None = None,
 ) -> UTXO:
     output = tx.outputs[output_index]
     owner_pubkey_hash = output.payload[:32] if output.template_id == TEMPLATE_PKH else bytes(32)
     return UTXO(
-        outpoint=Outpoint(tx.tx_id(), output_index),
+        outpoint=Outpoint(tx.tx_id() if outpoint_tx_id is None else outpoint_tx_id, output_index),
         amount_matoms=output.amount_matoms,
         template_id=output.template_id,
         owner_pubkey_hash=owner_pubkey_hash,
@@ -1482,7 +1493,7 @@ def _utxo_from_output(
 def _utxo_from_anchor_output(anchor_hash: bytes, output_index: int, output: Output) -> UTXO:
     owner_pubkey_hash = output.payload[:32] if output.template_id == TEMPLATE_PKH else bytes(32)
     return UTXO(
-        outpoint=Outpoint(hash_bytes(ANCHOR_REWARD_PREFIX + anchor_hash), output_index),
+        outpoint=Outpoint(anchor_reward_outpoint_tx_id(anchor_hash), output_index),
         amount_matoms=output.amount_matoms,
         template_id=output.template_id,
         owner_pubkey_hash=owner_pubkey_hash,

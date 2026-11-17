@@ -632,6 +632,27 @@ Coinbase transactions MUST have `input_count == COINBASE_INPUT_COUNT`, MUST be
 the first transaction in a fruit, and MUST NOT mint more than the fruit's
 assigned subsidy plus tips.
 
+Coinbase outputs are NOT created at `Outpoint(coinbase_tx_id, index)`. Because a
+coinbase has no inputs, two coinbases with identical outputs share a `tx_id`, so
+that outpoint would not be unique. Fruit coinbase output `index` is created at:
+
+```text
+Outpoint(BLAKE3("fruitcoinbaseout:" || fruit_hash), index)
+```
+
+Anchor reward output `index` is created at
+`Outpoint(BLAKE3("anchorreward:" || anchor_hash), index)`. Both hashes are bound
+by proof of work and chain back to the genesis anchor, so every root outpoint is
+unique within a chain and differs between chains. All other outpoints
+descend from these by `tx_id`, so a spent outpoint can never be recreated and a
+signed spend can never be replayed, on the same chain or across mainnet and
+testnet.
+
+A non-coinbase transaction is applied at most once per anchor branch. If a
+covered fruit carries a transaction whose `tx_id` was already applied by an
+earlier fruit in the same anchor or by an ancestor anchor, that copy is ignored:
+it creates no outputs, earns no tip and is not re-validated.
+
 ### Script Templates
 
 Scripts are stack machines with byte opcodes from the constants table. Script
@@ -977,7 +998,7 @@ The reward split within each anchor interval is pure work proportional as
 defined in section 6. Fruit miners claim the fruit pool plus realized tips
 through fruit coinbase transactions. Anchor miners claim at most the anchor pool
 through `anchor_reward_outputs`, which are committed by `anchor_reward_root` in
-the anchor header and use anchor-hash-derived outpoints. Coinbase outputs mature
+the anchor header and use anchor-hash-derived outpoints (section 10). Coinbase outputs mature
 after `COINBASE_MATURITY_ANCHORS`. Transactions covered by an anchor are
 validated against that anchor's post-application height for lockheight and
 coinbase-maturity checks. Therefore a fruit coinbase output created in anchor

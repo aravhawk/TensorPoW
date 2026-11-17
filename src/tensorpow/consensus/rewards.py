@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Final
 
 from tensorpow.consensus.anchor_daa import anchor_work_weight
-from tensorpow.crypto.hash import HASH_LEN_BYTES
+from tensorpow.crypto.hash import HASH_LEN_BYTES, hash_bytes
 from tensorpow.state.utxo import MAX_SUPPLY_MATOMS
 
 FRUIT_REWARD_WEIGHT: Final[int] = 1
@@ -24,6 +24,28 @@ INITIAL_EPOCH_SUBSIDY_TSC: Final[int] = 10_500_000
 INITIAL_EPOCH_SUBSIDY_MATOMS: Final[int] = INITIAL_EPOCH_SUBSIDY_TSC * MATOMS_PER_TSC
 COINBASE_MATURITY_ANCHORS: Final[int] = 100
 U64_MAX: Final[int] = 0xFFFFFFFFFFFFFFFF
+FRUIT_COINBASE_OUTPOINT_PREFIX: Final[bytes] = b"fruitcoinbaseout:"
+ANCHOR_REWARD_OUTPOINT_PREFIX: Final[bytes] = b"anchorreward:"
+
+
+def fruit_coinbase_outpoint_tx_id(fruit_hash: bytes) -> bytes:
+    """Return the outpoint tx_id under which a fruit's coinbase outputs are created.
+
+    Coinbase transactions have no inputs, so two coinbases with the same outputs share
+    a tx_id. Deriving the outpoint from the PoW-bound, chain-bound fruit hash keeps
+    every reward outpoint unique, so a spent coinbase output can never be recreated
+    and a spend of it can never be replayed on this or another chain.
+    """
+
+    _require_hash("fruit_hash", fruit_hash)
+    return hash_bytes(FRUIT_COINBASE_OUTPOINT_PREFIX + fruit_hash)
+
+
+def anchor_reward_outpoint_tx_id(anchor_hash: bytes) -> bytes:
+    """Return the outpoint tx_id under which an anchor's reward outputs are created."""
+
+    _require_hash("anchor_hash", anchor_hash)
+    return hash_bytes(ANCHOR_REWARD_OUTPOINT_PREFIX + anchor_hash)
 
 
 def interval_subsidy_matoms(anchor_height: int, minted_supply_matoms: int = 0) -> int:
@@ -133,8 +155,10 @@ def _require_nonnegative_int(name: str, value: int) -> int:
 
 
 __all__ = [
+    "ANCHOR_REWARD_OUTPOINT_PREFIX",
     "COINBASE_MATURITY_ANCHORS",
     "DAYS_PER_YEAR",
+    "FRUIT_COINBASE_OUTPOINT_PREFIX",
     "FRUIT_REWARD_WEIGHT",
     "HALVING_INTERVAL_ANCHORS",
     "HALVING_YEARS",
@@ -145,7 +169,9 @@ __all__ = [
     "MATOMS_PER_TSC",
     "MAX_SUPPLY_TSC",
     "MINUTES_PER_HOUR",
+    "anchor_reward_outpoint_tx_id",
     "coinbase_maturity_height",
+    "fruit_coinbase_outpoint_tx_id",
     "fruit_subsidy_assignments",
     "interval_subsidy_matoms",
     "reward_pools",
