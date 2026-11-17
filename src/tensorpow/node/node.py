@@ -51,6 +51,7 @@ from tensorpow.mempool import (
     burned_fee_matoms,
 )
 from tensorpow.net import LibP2PNode, NodeIdentity
+from tensorpow.node.admission import REASON_POW_VERIFIER_BUSY, AdmissionConfig, PeerAdmission
 from tensorpow.pow.challenge import GENESIS_PARENT_HASH, PowHeader
 from tensorpow.pow.kernel import FRUIT_TARGET_LE, Backend
 from tensorpow.pow.verify import verify_pow
@@ -272,12 +273,14 @@ class TensorPowNode:
         *,
         pow_backend: Backend = "auto",
         pow_verifier: PowVerifier | None = None,
+        admission: AdmissionConfig | None = None,
     ) -> None:
         if not isinstance(config, TensorPowConfig):
             raise TypeError("config must be TensorPowConfig")
         self.config = config
         self._pow_backend = pow_backend
         self._pow_verifier = _default_pow_verifier if pow_verifier is None else pow_verifier
+        self.admission = PeerAdmission(admission)
         self._state_lock = RLock()
         self.store = RocksDBStore(config.data_dir / "rocksdb")
         self.shard_tree = self.store.get_shard_tree() or ShardTree()
@@ -352,37 +355,51 @@ class TensorPowNode:
             self.mempool = staged_mempool
             return NodeResult.ok(tx.tx_id()), add_result
 
-    def process_fruit_bytes(self, data: bytes) -> NodeResult:
+    def process_fruit_bytes(self, data: bytes, *, peer_id: str | None = None) -> NodeResult:
         """Decode, validate, apply, and persist one fruit."""
 
+        banned = self.admission.check_peer(peer_id)
+        if banned is not None:
+            return NodeResult.reject(banned)
         try:
             fruit = Fruit.deserialize(data)
         except (TypeError, ValueError, BlockDecodeError, HeaderDecodeError):
+            self.admission.strike(peer_id)
             return NodeResult.reject("malformed_fruit")
-        return self.process_fruit(fruit)
+        return self.process_fruit(fruit, peer_id=peer_id)
 
-    def process_fruit(self, fruit: Fruit) -> NodeResult:
-        """Apply one validated fruit body to local state."""
+    def process_fruit(self, fruit: Fruit, *, peer_id: str | None = None) -> NodeResult:
+        """Apply one validated fruit body to local state.
+
+        Cheap structural and dependency checks run under the state lock; the PoW
+        verification runs outside it, charged to ``peer_id`` and capped node-wide, so
+        junk proofs cannot stall unrelated processing. State is re-validated under the
+        lock before anything is applied.
+        """
+
+        if not isinstance(fruit, Fruit):
+            raise TypeError("fruit must be Fruit")
+        banned = self.admission.check_peer(peer_id)
+        if banned is not None:
+            return NodeResult.reject(banned)
+        fruit_hash = fruit.block_hash()
+        with self._state_lock:
+            precheck_error, _txs, parent_candidates = self._fruit_precheck(fruit, fruit_hash)
+        if precheck_error is not None:
+            return NodeResult.reject(precheck_error)
+        pow_error = self._admit_pow(
+            peer_id,
+            fruit.header.to_pow_header(parent_candidates),
+            FRUIT_TARGET_LE,
+            invalid_reason="fruit_pow_invalid",
+        )
+        if pow_error is not None:
+            return NodeResult.reject(pow_error)
 
         with self._state_lock:
-            if not isinstance(fruit, Fruit):
-                raise TypeError("fruit must be Fruit")
-            fruit_hash = fruit.block_hash()
-            if self.store.get_body_bytes(fruit_hash) is not None:
-                return NodeResult.reject("duplicate_fruit")
-            try:
-                txs = tuple(Transaction.from_bytes(raw) for raw in fruit.transactions)
-            except (TypeError, ValueError, TxDecodeError):
-                return NodeResult.reject("malformed_fruit_tx")
-            if not txs or txs[0].inputs:
-                return NodeResult.reject("missing_coinbase")
-            if any(not tx.inputs for tx in txs[1:]):
-                return NodeResult.reject("extra_coinbase")
-            dependency_error, parent_candidates = self._validate_fruit_dependencies(fruit)
-            if dependency_error is not None:
-                return NodeResult.reject(dependency_error)
-            if not self._verify_pow(fruit.header.to_pow_header(parent_candidates), FRUIT_TARGET_LE):
-                return NodeResult.reject("fruit_pow_invalid")
+            precheck_error, txs, _parent_candidates = self._fruit_precheck(fruit, fruit_hash)
+            if precheck_error is not None:
+                return NodeResult.reject(precheck_error)
 
             current_anchor_height = self._anchor_height()
             covering_anchor_height = current_anchor_height + 1
@@ -445,29 +462,96 @@ class TensorPowNode:
             )
             return NodeResult.ok(fruit_hash)
 
-    def process_anchor_bytes(self, data: bytes) -> NodeResult:
+    def _fruit_precheck(
+        self,
+        fruit: Fruit,
+        fruit_hash: bytes,
+    ) -> tuple[str | None, tuple[Transaction, ...], tuple[bytes, ...]]:
+        if self.store.get_body_bytes(fruit_hash) is not None:
+            return "duplicate_fruit", (), ()
+        try:
+            txs = tuple(Transaction.from_bytes(raw) for raw in fruit.transactions)
+        except (TypeError, ValueError, TxDecodeError):
+            return "malformed_fruit_tx", (), ()
+        if not txs or txs[0].inputs:
+            return "missing_coinbase", (), ()
+        if any(not tx.inputs for tx in txs[1:]):
+            return "extra_coinbase", (), ()
+        dependency_error, parent_candidates = self._validate_fruit_dependencies(fruit)
+        if dependency_error is not None:
+            return dependency_error, (), ()
+        return None, txs, parent_candidates
+
+    def _admit_pow(
+        self,
+        peer_id: str | None,
+        header: PowHeader,
+        target: bytes,
+        *,
+        invalid_reason: str,
+    ) -> str | None:
+        """Verify PoW outside the state lock under per-peer and node-wide limits."""
+
+        budget_error = self.admission.consume_pow_budget(peer_id)
+        if budget_error is not None:
+            return budget_error
+        with self.admission.pow_slot(blocking=peer_id is None) as acquired:
+            if not acquired:
+                return REASON_POW_VERIFIER_BUSY
+            if self._verify_pow(header, target):
+                return None
+        self.admission.ban(peer_id)
+        return invalid_reason
+
+    def process_anchor_bytes(self, data: bytes, *, peer_id: str | None = None) -> NodeResult:
         """Decode, validate, apply, and persist one anchor."""
 
+        banned = self.admission.check_peer(peer_id)
+        if banned is not None:
+            return NodeResult.reject(banned)
         try:
             anchor = Anchor.deserialize(data)
         except (TypeError, ValueError, BlockDecodeError, HeaderDecodeError):
+            self.admission.strike(peer_id)
             return NodeResult.reject("malformed_anchor")
-        return self.process_anchor(anchor)
+        return self.process_anchor(anchor, peer_id=peer_id)
 
-    def process_anchor(self, anchor: Anchor) -> NodeResult:
-        """Apply one validated anchor body to local state."""
+    def process_anchor(self, anchor: Anchor, *, peer_id: str | None = None) -> NodeResult:
+        """Apply one validated anchor body to local state.
+
+        As for fruits, PoW is verified outside the state lock and charged to ``peer_id``.
+        """
+
+        if not isinstance(anchor, Anchor):
+            raise TypeError("anchor must be Anchor")
+        banned = self.admission.check_peer(peer_id)
+        if banned is not None:
+            return NodeResult.reject(banned)
+        anchor_hash = anchor.block_hash()
+        is_genesis_anchor = anchor.genesis_commitment != bytes(HASH_LEN_BYTES)
+        with self._state_lock:
+            precheck_error = self._anchor_precheck(anchor, anchor_hash)
+            pow_target = None
+            if precheck_error is None and not is_genesis_anchor:
+                _height, pow_target, _work = self._anchor_position(anchor)
+                if pow_target is None:
+                    precheck_error = "missing_anchor_parent"
+        if precheck_error is not None:
+            return NodeResult.reject(precheck_error)
+        if pow_target is not None:
+            pow_error = self._admit_pow(
+                peer_id,
+                anchor.header.to_pow_header(),
+                pow_target,
+                invalid_reason="anchor_pow_invalid",
+            )
+            if pow_error is not None:
+                return NodeResult.reject(pow_error)
 
         with self._state_lock:
-            if not isinstance(anchor, Anchor):
-                raise TypeError("anchor must be Anchor")
-            anchor_hash = anchor.block_hash()
-            if self.store.get_body_bytes(anchor_hash) is not None:
-                if anchor.genesis_commitment != bytes(HASH_LEN_BYTES):
-                    return NodeResult.reject("genesis_not_first")
-                return NodeResult.reject("duplicate_anchor")
-            dependency_error = self._validate_anchor_dependencies(anchor)
-            if dependency_error is not None:
-                return NodeResult.reject(dependency_error)
+            precheck_error = self._anchor_precheck(anchor, anchor_hash)
+            if precheck_error is not None:
+                return NodeResult.reject(precheck_error)
             try:
                 next_tree = ShardTree.deserialize(anchor.shard_tree_bytes)
             except (TypeError, ValueError):
@@ -521,7 +605,19 @@ class TensorPowNode:
                 self.mempool = self._rebuild_mempool(self.store.mempool_txs())
             return NodeResult.ok(anchor_hash)
 
-    def _validate_anchor_dependencies(self, anchor: Anchor) -> str | None:
+    def _anchor_precheck(self, anchor: Anchor, anchor_hash: bytes) -> str | None:
+        if self.store.get_body_bytes(anchor_hash) is not None:
+            if anchor.genesis_commitment != bytes(HASH_LEN_BYTES):
+                return "genesis_not_first"
+            return "duplicate_anchor"
+        return self._validate_anchor_dependencies(anchor, verify_pow=False)
+
+    def _validate_anchor_dependencies(
+        self,
+        anchor: Anchor,
+        *,
+        verify_pow: bool = True,
+    ) -> str | None:
         is_genesis_anchor = anchor.genesis_commitment != bytes(HASH_LEN_BYTES)
         if anchor.header.timestamp_ms > _now_ms() + MAX_FUTURE_DRIFT_MS:
             return "anchor_time_too_new"
@@ -545,8 +641,9 @@ class TensorPowNode:
         anchor_mtp = _anchor_median_time_past(history)
         if anchor_mtp is not None and anchor.header.timestamp_ms <= anchor_mtp:
             return "anchor_time_too_old"
-        target = next_anchor_target(history)
-        if not self._verify_pow(anchor.header.to_pow_header(), target):
+        if verify_pow and not self._verify_pow(
+            anchor.header.to_pow_header(), next_anchor_target(history)
+        ):
             return "anchor_pow_invalid"
 
         for fruit_hash in anchor.covered_fruit_hashes:
