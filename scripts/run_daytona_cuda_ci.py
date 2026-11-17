@@ -238,11 +238,30 @@ def run(sandbox: Sandbox, command: str, *, cwd: str | None = None, timeout: int)
     response = sandbox.process.exec(command, cwd=cwd, timeout=timeout)
     output = str(response.result)
     if output:
-        print(output, end="" if output.endswith("\n") else "\n", flush=True)
+        print_untrusted_output(output)
     result = CommandResult(exit_code=int(response.exit_code), output=output)
     if result.exit_code != 0:
         raise RuntimeError(f"command failed with exit code {result.exit_code}: {command}")
     return result
+
+
+def print_untrusted_output(output: str, *, token: str | None = None) -> None:
+    """Print PR-controlled sandbox output without letting it issue workflow commands.
+
+    GitHub Actions parses ``::command::`` lines on stdout (``::add-mask::``,
+    ``::error::``, ``::set-output::``...). The output is wrapped in a
+    ``::stop-commands::<token>`` block with a fresh random token the PR code cannot
+    know, so nothing inside it is interpreted.
+    """
+
+    stop_token = uuid.uuid4().hex if token is None else token
+    while stop_token in output:
+        stop_token = uuid.uuid4().hex
+    print(f"::stop-commands::{stop_token}", flush=True)
+    try:
+        print(output, end="" if output.endswith("\n") else "\n", flush=True)
+    finally:
+        print(f"::{stop_token}::", flush=True)
 
 
 def shell_join(*parts: str) -> str:

@@ -244,3 +244,24 @@ def test_ci_run_label_comes_from_github_actions(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("GITHUB_RUN_ID", "123")
     monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
     assert ci.ci_run_label() == "123-2"
+
+
+def test_untrusted_sandbox_output_cannot_issue_workflow_commands(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """L-6: PR-controlled output is fenced by ::stop-commands:: with a fresh token."""
+
+    malicious = "ok\n::add-mask::secret\n::error::forged\n"
+    ci.print_untrusted_output(malicious)
+    lines = capsys.readouterr().out.splitlines()
+
+    assert lines[0].startswith("::stop-commands::")
+    token = lines[0].removeprefix("::stop-commands::")
+    assert len(token) == 32
+    assert token not in malicious
+    assert lines[-1] == f"::{token}::"
+    assert lines[1:-1] == malicious.splitlines()
+
+    ci.print_untrusted_output(f"::{token}::\n", token=token)
+    second = capsys.readouterr().out.splitlines()
+    assert second[0] != f"::stop-commands::{token}"
