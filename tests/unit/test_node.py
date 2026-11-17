@@ -1609,3 +1609,24 @@ def test_mempool_admission_uses_the_next_covering_height_and_wall_clock(
         assert node.get_tx(spend.tx_id()) is not None
     finally:
         node.close()
+
+
+def test_data_dir_from_other_consensus_rules_is_refused(tmp_path: Path) -> None:
+    from tensorpow.storage import COLUMN_BODIES, COLUMN_DAG, RocksDBStore
+
+    fresh = _node(tmp_path / "fresh")
+    fresh.close()
+    reopened = _node(tmp_path / "fresh")
+    reopened.close()
+
+    legacy_store = RocksDBStore(tmp_path / "legacy" / "rocksdb")
+    legacy_store.put(COLUMN_BODIES, bytes(32), b"old-format-body")
+    legacy_store.close()
+    with pytest.raises(node_module.IncompatibleDataDirError, match="unversioned"):
+        _node(tmp_path / "legacy")
+
+    other_store = RocksDBStore(tmp_path / "other" / "rocksdb")
+    other_store.put(COLUMN_DAG, b"meta:consensus-rules-version", (1).to_bytes(8, "little"))
+    other_store.close()
+    with pytest.raises(node_module.IncompatibleDataDirError, match="rules 1"):
+        _node(tmp_path / "other")

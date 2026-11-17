@@ -10,6 +10,31 @@ This document uses "MUST", "MUST NOT", "SHOULD", and "MAY" in their normal
 standards sense. All consensus integers are unsigned and little-endian unless a
 field explicitly says otherwise.
 
+### Consensus changelog
+
+Pre-launch rules revision 2 (security review of 2026-11-17). No network has
+launched, so this is a clean break, not a hardfork. Nodes record the revision in
+their data dir (`CONSENSUS_RULES_VERSION = 2`) and refuse a data dir written under
+other rules. Operators must move such data dirs aside and resync.
+
+- Anchor parent candidates are derived from the anchor chain's covered past only
+  (section 4, Anchor Body).
+- `parent_bitmap` must be minimally encoded, and the fruit PoW preimage commits
+  the exact bitmap bytes (sections 3 and 4).
+- Fruit coinbase outputs use fruit-hash-derived outpoints, and a transaction id is
+  applied at most once per branch (section 10).
+- Shard tree and fee floors are recomputed by validators, and split/merge are
+  MUST rules (sections 11 and 12).
+- The anchor header commits `utxo_state_root`, the parent post-state, and the anchor
+  PoW preimage covers it. The genesis anchor hash changes for the same ceremony
+  inputs (sections 4, 8 and 17).
+- The signature hash commits all spent input amounts (section 10).
+- `tx_id` excludes witnesses; the new `wtx_id` covers them and feeds
+  `tx_merkle_root` (section 10).
+- Anchor reward outputs mature like coinbase outputs (section 16).
+- Ed25519 edge-case acceptance is explicit (section 2).
+- Gossip topics are chain-scoped and payload ceilings are lower (section 13).
+
 ---
 
 ## 1. Overview & Invariants

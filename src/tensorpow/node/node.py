@@ -104,6 +104,10 @@ FRUIT_KIND_PREFIX: Final[bytes] = b"kind:fruit:"
 ANCHOR_KIND_PREFIX: Final[bytes] = b"kind:anchor:"
 KIND_INDEX_MARKER_KEY: Final[bytes] = b"meta:kind-index-v1"
 BRANCH_STATE_CACHE_SIZE: Final[int] = 8
+# Pre-launch consensus rules revision (see PROTOCOL_SPEC.md "Consensus changelog").
+# A data dir written under different rules is refused instead of being reinterpreted.
+CONSENSUS_RULES_VERSION: Final[int] = 2
+CONSENSUS_RULES_VERSION_KEY: Final[bytes] = b"meta:consensus-rules-version"
 U256_BYTES: Final[int] = 32
 ANCHOR_META_BYTES: Final[int] = U64_BYTES + HASH_LEN_BYTES + U256_BYTES
 
@@ -332,6 +336,11 @@ class TensorPowNode:
         self.admission = PeerAdmission(admission)
         self._state_lock = RLock()
         self.store = RocksDBStore(config.data_dir / "rocksdb")
+        try:
+            _require_consensus_rules_version(self.store)
+        except Exception:
+            self.store.close()
+            raise
         self.shard_tree = self.store.get_shard_tree() or ShardTree()
         self.utxo_set = UTXOSet(self.store.utxos())
         self.mempool = self._rebuild_mempool(self.store.mempool_txs())
@@ -2073,6 +2082,25 @@ def _load_or_create_identity(path: Path) -> NodeIdentity:
     return identity
 
 
+class IncompatibleDataDirError(RuntimeError):
+    """Raised when a data dir was written under different consensus rules."""
+
+
+def _require_consensus_rules_version(store: RocksDBStore) -> None:
+    stored = store.get(COLUMN_DAG, CONSENSUS_RULES_VERSION_KEY)
+    expected = _u64(CONSENSUS_RULES_VERSION)
+    if stored == expected:
+        return
+    if stored is None and next(store.items(COLUMN_BODIES), None) is None:
+        store.put(COLUMN_DAG, CONSENSUS_RULES_VERSION_KEY, expected)
+        return
+    found = "unversioned" if stored is None else str(_decode_u64_or_zero(stored))
+    raise IncompatibleDataDirError(
+        f"data dir was written under consensus rules {found}, this node implements "
+        f"{CONSENSUS_RULES_VERSION}; move it aside and resync"
+    )
+
+
 def _require_table(raw: dict[str, object], name: str) -> dict[str, object]:
     value = raw.get(name, {})
     if not isinstance(value, dict):
@@ -2152,12 +2180,14 @@ def _require_hash(name: str, value: bytes) -> None:
 
 
 __all__ = [
+    "CONSENSUS_RULES_VERSION",
     "DEFAULT_CONFIG_NAME",
     "DEFAULT_DATA_DIR",
     "DEFAULT_P2P_TCP_PORT",
     "DEFAULT_RPC_HOST",
     "DEFAULT_RPC_PORT",
     "AnchorTemplate",
+    "IncompatibleDataDirError",
     "NodeResult",
     "TensorPowConfig",
     "TensorPowNode",
