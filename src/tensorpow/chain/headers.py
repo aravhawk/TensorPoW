@@ -53,6 +53,8 @@ class FruitHeader:
         _require_sig_mask(self.sig_type_supported)
         require_hash("parent_selected", self.parent_selected)
         _require_bytes("parent_bitmap", self.parent_bitmap, max_len=PARENT_BITMAP_MAX_BYTES)
+        if self.parent_bitmap and self.parent_bitmap[-1] == 0:
+            raise ValueError("parent_bitmap must be minimally encoded (no trailing zero byte)")
         require_hash("latest_anchor", self.latest_anchor)
         require_hash("tx_merkle_root", self.tx_merkle_root)
         _require_uint("timestamp_ms", self.timestamp_ms, U64_MAX)
@@ -109,6 +111,8 @@ class FruitHeader:
     def effective_parent_hashes(self, parent_candidates: tuple[bytes, ...]) -> tuple[bytes, ...]:
         for parent_hash in parent_candidates:
             require_hash("parent_candidate", parent_hash)
+        if len(self.parent_bitmap) > (len(parent_candidates) + 7) // 8:
+            raise ValueError("parent_bitmap is longer than the parent candidate list requires")
         selected = [self.parent_selected]
         for index, candidate in enumerate(parent_candidates):
             if index // 8 < len(self.parent_bitmap) and (
@@ -131,6 +135,7 @@ class FruitHeader:
             timestamp_ms=self.timestamp_ms,
             shard_id=self.shard_id,
             nonce=self.nonce,
+            parent_bitmap=self.parent_bitmap,
         )
 
 

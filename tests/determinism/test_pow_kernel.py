@@ -16,7 +16,7 @@ from tensorpow.pow.kernel import (
     resolve_backend,
 )
 
-REFERENCE_POW_DIGEST = "f1aa4b92aceca26dbd45402dd4b996f9ff76d6c31db66df675bba44649bbbed3"
+REFERENCE_POW_DIGEST = "72e4a0a4b47f241ccffbcd8be45bc7439071864b7f900b44bca04cddccda9fa9"
 
 
 def _reference_header() -> FruitPowHeader:
@@ -29,6 +29,7 @@ def _reference_header() -> FruitPowHeader:
         timestamp_ms=1_779_841_408_123,
         shard_id=(3 << 16) | 5,
         nonce=42,
+        parent_bitmap=b"\x01",
     )
 
 

@@ -144,6 +144,8 @@ fruit_pow_preimage =
     sig_type_supported_u16_le ||
     parent_count_u16_le ||
     effective_parent_hashes ||
+    parent_bitmap_len_u16_le ||
+    parent_bitmap ||
     latest_anchor ||
     tx_merkle_root ||
     timestamp_ms_u64_le ||
@@ -168,7 +170,10 @@ anchor_pow_preimage =
 ```
 
 `effective_parent_hashes` are encoded in the canonical order defined in section
-4. The BLAKE3 XOF inputs are:
+4. `parent_bitmap` is the exact bitmap byte string from the fruit header, so every
+fruit-header byte that feeds `fruit_hash` is also bound by the proof of work and
+one solution cannot be re-encoded into a second valid fruit. The BLAKE3 XOF
+inputs are:
 
 ```text
 A_bytes = BLAKE3_XOF(DOMAIN_POW_MATRIX_A || pow_preimage, POW_MATRIX_BYTES)
@@ -245,6 +250,12 @@ candidate with a set bit. The effective parent hash order for PoW and
 serialization-derived checks is `parent_selected`, then selected candidate
 hashes in parent-candidate-list order. The set MUST NOT contain duplicates. Bits
 beyond the candidate list MUST be zero.
+
+`parent_bitmap` MUST be minimally encoded: a non-empty bitmap MUST NOT end in a
+zero byte, and its length MUST NOT exceed `ceil(parent_candidate_count /
+BYTE_BITS)`. An empty bitmap selects no candidates. Together with the bitmap
+binding in the PoW preimage (section 3), this makes the fruit header a unique
+encoding of its effective parent set.
 
 ### Fruit Body
 

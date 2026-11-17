@@ -37,6 +37,7 @@ class FruitPowHeader:
     timestamp_ms: int
     shard_id: int
     nonce: int
+    parent_bitmap: bytes = b""
 
     def __post_init__(self) -> None:
         _require_u16("version", self.version)
@@ -44,6 +45,10 @@ class FruitPowHeader:
         if self.sig_type_supported & SIG_TYPE_ED25519_BIT == 0:
             raise ValueError("sig_type_supported must include SIG_TYPE_ED25519_BIT")
         _require_hash_tuple("effective_parent_hashes", self.effective_parent_hashes)
+        if not isinstance(self.parent_bitmap, bytes):
+            raise TypeError("parent_bitmap must be bytes")
+        if len(self.parent_bitmap) > U16_MAX:
+            raise ValueError("parent_bitmap must fit in uint16 length")
         _require_hash("latest_anchor", self.latest_anchor)
         _require_hash("tx_merkle_root", self.tx_merkle_root)
         _require_u64("timestamp_ms", self.timestamp_ms)
@@ -92,6 +97,8 @@ def fruit_pow_preimage(header: FruitPowHeader) -> bytes:
             _u16(header.sig_type_supported),
             _u16(len(header.effective_parent_hashes)),
             b"".join(header.effective_parent_hashes),
+            _u16(len(header.parent_bitmap)),
+            header.parent_bitmap,
             header.latest_anchor,
             header.tx_merkle_root,
             _u64(header.timestamp_ms),

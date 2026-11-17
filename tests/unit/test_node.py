@@ -19,7 +19,7 @@ from tensorpow.chain.blocks import (
     parent_candidate_root,
     tx_merkle_root,
 )
-from tensorpow.chain.headers import AnchorHeader, FruitHeader
+from tensorpow.chain.headers import PARENT_BITMAP_MAX_BYTES, AnchorHeader, FruitHeader
 from tensorpow.consensus.anchor_daa import ANCHOR_INITIAL_TARGET_LE, AnchorRecord
 from tensorpow.consensus.ghostdag import DYNAMIC_K_MIN
 from tensorpow.consensus.rewards import (
@@ -32,7 +32,9 @@ from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
 from tensorpow.genesis import GENESIS_CHAIN_ID_TESTNET, GenesisInputs, build_genesis_artifact
 from tensorpow.mempool import ROOT_SHARD_ID, ShardTree
 from tensorpow.node import TensorPowConfig, TensorPowNode, write_default_config
-from tensorpow.pow.challenge import FORMAT_EPOCH, GENESIS_PARENT_HASH
+from tensorpow.pow.challenge import FORMAT_EPOCH, GENESIS_PARENT_HASH, pow_preimage
+from tensorpow.pow.kernel import FRUIT_TARGET_LE
+from tensorpow.pow.verify import verify_pow
 from tensorpow.state.utxo import MAX_SUPPLY_MATOMS, TEMPLATE_PKH, UTXO, Outpoint
 from tensorpow.storage import COLUMN_MEMPOOL
 from tensorpow.tx.transaction import Output, Transaction
@@ -209,6 +211,113 @@ def test_fruit_dependencies_pow_and_coinbase_limits_are_required(tmp_path: Path)
     too_large_fruit = _fruit((too_large.to_bytes(),), latest_anchor=genesis.block_hash())
     assert node.process_fruit(too_large_fruit).reason == "coinbase_too_large"
     node.close()
+
+
+def test_one_pow_solution_cannot_be_replayed_with_padded_parent_bitmap(tmp_path: Path) -> None:
+    """H-1 / repro R1: trailing zero bitmap bytes must not mint extra valid fruits."""
+
+    genesis = _genesis_anchor()
+    node = TensorPowNode(
+        TensorPowConfig(
+            data_dir=tmp_path / "node",
+            chain_id=GENESIS_CHAIN_ID_TESTNET,
+            expected_genesis_hash=genesis.block_hash(),
+        ),
+        pow_backend="cpu",
+    )
+    try:
+        assert node.process_anchor(genesis)
+        root = _mine_fruit((_coinbase_tx(46).to_bytes(),), latest_anchor=genesis.block_hash())
+        assert node.process_fruit(root).accepted
+        mined = _mine_fruit(
+            (_coinbase_tx(48).to_bytes(),),
+            latest_anchor=genesis.block_hash(),
+            parent_selected=root.block_hash(),
+            timestamp_ms=2,
+        )
+        assert node.process_fruit(mined).accepted
+
+        accepted_clones = 0
+        for padding in (1, 2, 7, PARENT_BITMAP_MAX_BYTES):
+            clone = _with_raw_parent_bitmap(mined, bytes(padding))
+            assert clone != mined.serialize()
+            if node.process_fruit_bytes(clone).accepted:
+                accepted_clones += 1
+        assert accepted_clones == 0
+    finally:
+        node.close()
+
+
+def test_fruit_pow_preimage_binds_exact_parent_bitmap_bytes() -> None:
+    base = _fruit((_coinbase_tx(47).to_bytes(),), parent_selected=bytes.fromhex("01" * 32))
+    candidates = (bytes.fromhex("02" * 32),)
+    selecting = FruitHeader(
+        version=base.header.version,
+        sig_type_supported=base.header.sig_type_supported,
+        parent_selected=base.header.parent_selected,
+        parent_bitmap=b"\x01",
+        latest_anchor=base.header.latest_anchor,
+        tx_merkle_root=base.header.tx_merkle_root,
+        timestamp_ms=base.header.timestamp_ms,
+        shard_id=base.header.shard_id,
+        nonce=base.header.nonce,
+    )
+
+    assert pow_preimage(base.header.to_pow_header(candidates)) != pow_preimage(
+        selecting.to_pow_header(candidates)
+    )
+    with pytest.raises(ValueError, match="minimally encoded"):
+        FruitHeader(
+            version=base.header.version,
+            sig_type_supported=base.header.sig_type_supported,
+            parent_selected=base.header.parent_selected,
+            parent_bitmap=b"\x01\x00",
+            latest_anchor=base.header.latest_anchor,
+            tx_merkle_root=base.header.tx_merkle_root,
+            timestamp_ms=base.header.timestamp_ms,
+            shard_id=base.header.shard_id,
+            nonce=base.header.nonce,
+        )
+
+
+def _mine_fruit(
+    transactions: tuple[bytes, ...],
+    *,
+    latest_anchor: bytes,
+    parent_selected: bytes = GENESIS_PARENT_HASH,
+    timestamp_ms: int = 1,
+) -> Fruit:
+    for nonce in range(2_000):
+        candidate = _fruit(
+            transactions,
+            latest_anchor=latest_anchor,
+            parent_selected=parent_selected,
+            timestamp_ms=timestamp_ms,
+            nonce=nonce,
+        )
+        if verify_pow(candidate.header.to_pow_header(()), FRUIT_TARGET_LE, backend="cpu"):
+            return candidate
+    raise AssertionError("no fruit solution found in nonce budget")
+
+
+def _with_raw_parent_bitmap(fruit: Fruit, bitmap: bytes) -> bytes:
+    header = fruit.header
+    header_bytes = b"".join(
+        (
+            header.version.to_bytes(2, "little"),
+            header.sig_type_supported.to_bytes(2, "little"),
+            header.parent_selected,
+            len(bitmap).to_bytes(2, "little"),
+            bitmap,
+            header.latest_anchor,
+            header.tx_merkle_root,
+            header.timestamp_ms.to_bytes(8, "little"),
+            header.shard_id.to_bytes(4, "little"),
+            header.nonce.to_bytes(8, "little"),
+        )
+    )
+    body = fruit.serialize()[2 + len(header.serialize()) :]
+    return len(header_bytes).to_bytes(2, "little") + header_bytes + body
 
 
 def test_pow_verifier_rejection_blocks_fruit_and_anchor(tmp_path: Path) -> None:
