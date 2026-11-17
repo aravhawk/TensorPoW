@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import time
 import tomllib
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
-from typing import Final
+from typing import Final, Protocol
 
 from tensorpow.chain.blocks import (
     PARENT_CANDIDATE_MAX_COUNT,
@@ -98,6 +99,10 @@ MAX_FUTURE_DRIFT_MS: Final[int] = 120_000
 MEDIAN_TIME_PAST_WINDOW: Final[int] = 11
 ANCHOR_HISTORY_LOOKBACK: Final[int] = max(WTEMA_WINDOW_ANCHORS + 1, MEDIAN_TIME_PAST_WINDOW)
 ANCHOR_META_PREFIX: Final[bytes] = b"anchormeta:"
+FRUIT_KIND_PREFIX: Final[bytes] = b"kind:fruit:"
+ANCHOR_KIND_PREFIX: Final[bytes] = b"kind:anchor:"
+KIND_INDEX_MARKER_KEY: Final[bytes] = b"meta:kind-index-v1"
+BRANCH_STATE_CACHE_SIZE: Final[int] = 8
 U256_BYTES: Final[int] = 32
 ANCHOR_META_BYTES: Final[int] = U64_BYTES + HASH_LEN_BYTES + U256_BYTES
 
@@ -131,6 +136,18 @@ class _AnchorBranchState:
     @property
     def shard_tree(self) -> ShardTree:
         return self.policy.tree
+
+    def copy(self) -> _AnchorBranchState:
+        return _AnchorBranchState(
+            height=self.height,
+            policy=self.policy.copy(),
+            utxo_set=self.utxo_set.copy(),
+            minted_supply=self.minted_supply,
+            claimed_fruits=dict(self.claimed_fruits),
+            confirmed_tx_ids=set(self.confirmed_tx_ids),
+            covered_closure=set(self.covered_closure),
+            frontier=set(self.frontier),
+        )
 
     @property
     def fee_floors(self) -> dict[int, int]:
@@ -318,6 +335,8 @@ class TensorPowNode:
         self.mempool = self._rebuild_mempool(self.store.mempool_txs())
         self.network_node: LibP2PNode | None = None
         self._fruit_dag_cache: BlockDAG | None = None
+        self._branch_state_cache: OrderedDict[bytes, _AnchorBranchState] = OrderedDict()
+        self._ensure_kind_index()
         self._running = False
         self._stop_event = asyncio.Event()
 
@@ -377,12 +396,14 @@ class TensorPowNode:
                 return NodeResult.reject("malformed_tx"), None
             if not tx.inputs:
                 return NodeResult.reject("coinbase_not_relayable"), None
-            staged_mempool = self._rebuild_mempool(self.mempool_transactions())
-            add_result = staged_mempool.add_tx(tx, utxo_view=self.utxo_set)
+            add_result = self.mempool.add_tx(tx, utxo_view=self.utxo_set)
             if not add_result.accepted:
                 return NodeResult.reject(add_result.reason or "mempool_rejected"), add_result
-            self.store.put_mempool_tx(tx)
-            self.mempool = staged_mempool
+            try:
+                self.store.put_mempool_tx(tx)
+            except BaseException:
+                self.mempool.remove(tx.tx_id())
+                raise
             return NodeResult.ok(tx.tx_id()), add_result
 
     def process_fruit_bytes(self, data: bytes, *, peer_id: str | None = None) -> NodeResult:
@@ -434,7 +455,7 @@ class TensorPowNode:
             current_anchor_height = self._anchor_height()
             covering_anchor_height = current_anchor_height + 1
             fee_floor = self._fee_floor_for_shard(fruit.header.shard_id)
-            validation_view = UTXOSet(self.utxo_set.utxos())
+            validation_view = _OverlayUTXOView(self.utxo_set)
             tip_sum = 0
             for tx in txs[1:]:
                 result, tip_matoms, _fee_matoms = _apply_spend_tx(
@@ -481,15 +502,14 @@ class TensorPowNode:
                         _fruit_meta_key(fruit_hash),
                         _encode_fruit_meta(_FruitMeta(coinbase_claim, tip_sum)),
                     ),
+                    BatchPut(COLUMN_DAG, FRUIT_KIND_PREFIX + fruit_hash, b""),
                 ),
                 deletes=state_batch.deletes,
             )
             self.store.write_batch(batch)
-            self._invalidate_fruit_dag_cache()
-            confirmed_tx_ids = {confirmed.tx_id() for confirmed in txs}
-            self.mempool = self._rebuild_mempool(
-                tuple(tx for tx in self.store.mempool_txs() if tx.tx_id() not in confirmed_tx_ids)
-            )
+            self._add_fruit_to_dag_cache(fruit_hash, fruit)
+            for confirmed in txs:
+                self.mempool.remove(confirmed.tx_id())
             return NodeResult.ok(fruit_hash)
 
     def _fruit_precheck(
@@ -621,6 +641,7 @@ class TensorPowNode:
                     _anchor_meta_key(anchor_hash),
                     _encode_anchor_meta(anchor_meta),
                 ),
+                BatchPut(COLUMN_DAG, ANCHOR_KIND_PREFIX + anchor_hash, b""),
             ]
             deletes: list[BatchDelete] = []
             if best_tip == anchor_hash:
@@ -629,6 +650,7 @@ class TensorPowNode:
                 deletes.extend(active_batch.deletes)
 
             self.store.write_batch(StorageBatch(puts=tuple(puts), deletes=tuple(deletes)))
+            self._cache_branch_state(anchor_hash, branch_state)
             if best_tip == anchor_hash:
                 self.shard_tree = branch_state.shard_tree
                 self.utxo_set = branch_state.utxo_set
@@ -803,14 +825,33 @@ class TensorPowNode:
         return tuple(reversed(chain))
 
     def _rebuild_anchor_branch_state(self, tip_hash: bytes) -> _AnchorBranchState | None:
-        chain_hashes = self._anchor_chain_hashes(tip_hash)
-        if chain_hashes is None:
-            return None
-        state = _empty_anchor_branch_state()
-        for anchor_hash in chain_hashes:
-            anchor = self._load_anchor(anchor_hash)
+        """Return a private copy of the post-state of ``tip_hash``.
+
+        Walks back only to the nearest cached ancestor state (normally the parent is
+        cached), so extending the active chain does not replay it from genesis.
+        """
+
+        pending: list[tuple[bytes, Anchor]] = []
+        seen: set[bytes] = set()
+        base: _AnchorBranchState | None = None
+        current_hash = tip_hash
+        while current_hash != GENESIS_PARENT_HASH:
+            cached = self._branch_state_cache.get(current_hash)
+            if cached is not None:
+                self._branch_state_cache.move_to_end(current_hash)
+                base = cached.copy()
+                break
+            if current_hash in seen:
+                return None
+            seen.add(current_hash)
+            anchor = self._load_anchor(current_hash)
             if anchor is None:
                 return None
+            pending.append((current_hash, anchor))
+            current_hash = anchor.header.parent_anchor
+
+        state = _empty_anchor_branch_state() if base is None else base
+        for anchor_hash, anchor in reversed(pending):
             meta = self._anchor_meta(anchor_hash)
             if meta is None:
                 return None
@@ -823,7 +864,15 @@ class TensorPowNode:
             )
             if apply_result is not None:
                 return None
+        if pending:
+            self._cache_branch_state(tip_hash, state)
         return state
+
+    def _cache_branch_state(self, anchor_hash: bytes, state: _AnchorBranchState) -> None:
+        self._branch_state_cache[anchor_hash] = state.copy()
+        self._branch_state_cache.move_to_end(anchor_hash)
+        while len(self._branch_state_cache) > BRANCH_STATE_CACHE_SIZE:
+            self._branch_state_cache.popitem(last=False)
 
     def _apply_anchor_to_branch(
         self,
@@ -926,13 +975,11 @@ class TensorPowNode:
             for fruit_hash, height in sorted(state.claimed_fruits.items())
         }
 
-        existing_utxo_keys = {key for key, _value in self.store.items(COLUMN_UTXO)}
+        existing_utxos = dict(self.store.items(COLUMN_UTXO))
         existing_fee_floor_keys = {key for key, _value in self.store.items(COLUMN_FEE_FLOORS)}
-        existing_claim_keys = {
-            key
-            for key, _value in self.store.items(COLUMN_DAG)
-            if key.startswith(FRUIT_COINBASE_CLAIMED_PREFIX)
-        }
+        existing_claims = dict(
+            self.store.items_with_prefix(COLUMN_DAG, FRUIT_COINBASE_CLAIMED_PREFIX)
+        )
 
         puts = [
             BatchPut(COLUMN_DAG, ANCHOR_HEIGHT_KEY, _u64(state.height)),
@@ -940,14 +987,22 @@ class TensorPowNode:
             BatchPut(COLUMN_DAG, MINTED_SUPPLY_KEY, _u64(state.minted_supply)),
             BatchPut(COLUMN_SHARD_TREE, b"current", state.shard_tree.serialize()),
         ]
-        puts.extend(BatchPut(COLUMN_UTXO, key, value) for key, value in utxo_by_key.items())
+        puts.extend(
+            BatchPut(COLUMN_UTXO, key, value)
+            for key, value in utxo_by_key.items()
+            if existing_utxos.get(key) != value
+        )
         puts.extend(
             BatchPut(COLUMN_FEE_FLOORS, key, value) for key, value in fee_floor_by_key.items()
         )
-        puts.extend(BatchPut(COLUMN_DAG, key, value) for key, value in claim_by_key.items())
+        puts.extend(
+            BatchPut(COLUMN_DAG, key, value)
+            for key, value in claim_by_key.items()
+            if existing_claims.get(key) != value
+        )
 
         deletes = [
-            BatchDelete(COLUMN_UTXO, key) for key in existing_utxo_keys if key not in utxo_by_key
+            BatchDelete(COLUMN_UTXO, key) for key in existing_utxos if key not in utxo_by_key
         ]
         deletes.extend(
             BatchDelete(COLUMN_FEE_FLOORS, key)
@@ -955,7 +1010,7 @@ class TensorPowNode:
             if key not in fee_floor_by_key
         )
         deletes.extend(
-            BatchDelete(COLUMN_DAG, key) for key in existing_claim_keys if key not in claim_by_key
+            BatchDelete(COLUMN_DAG, key) for key in existing_claims if key not in claim_by_key
         )
         deletes.extend(BatchDelete(COLUMN_MEMPOOL, tx_id) for tx_id in state.confirmed_tx_ids)
         return StorageBatch(puts=tuple(puts), deletes=tuple(deletes))
@@ -965,9 +1020,7 @@ class TensorPowNode:
         best_meta: _AnchorMeta | None = None
         extra_hash = None if extra is None else extra[0]
         extra_meta = None if extra is None else extra[1]
-        for block_hash, _body in self.store.items(COLUMN_BODIES):
-            if self._load_anchor(block_hash) is None:
-                continue
+        for block_hash in self._stored_anchor_hashes():
             meta = extra_meta if block_hash == extra_hash else self._anchor_meta(block_hash)
             if meta is None:
                 continue
@@ -996,10 +1049,26 @@ class TensorPowNode:
         return tuple(timestamps)
 
     def _has_stored_fruits(self) -> bool:
-        for block_hash, _body in self.store.items(COLUMN_BODIES):
-            if self._load_fruit(block_hash) is not None:
-                return True
-        return False
+        return next(self.store.items_with_prefix(COLUMN_DAG, FRUIT_KIND_PREFIX), None) is not None
+
+    def _stored_anchor_hashes(self) -> tuple[bytes, ...]:
+        return tuple(
+            key[len(ANCHOR_KIND_PREFIX) :]
+            for key, _value in self.store.items_with_prefix(COLUMN_DAG, ANCHOR_KIND_PREFIX)
+        )
+
+    def _ensure_kind_index(self) -> None:
+        """Build the fruit/anchor kind index once for stores written before it existed."""
+
+        if self.store.get(COLUMN_DAG, KIND_INDEX_MARKER_KEY) is not None:
+            return
+        puts = [BatchPut(COLUMN_DAG, KIND_INDEX_MARKER_KEY, b"\x01")]
+        for block_hash, body in self.store.items(COLUMN_BODIES):
+            if _decode_fruit_body(body) is not None:
+                puts.append(BatchPut(COLUMN_DAG, FRUIT_KIND_PREFIX + block_hash, b""))
+            elif _decode_anchor_body(body) is not None:
+                puts.append(BatchPut(COLUMN_DAG, ANCHOR_KIND_PREFIX + block_hash, b""))
+        self.store.write_batch(StorageBatch(puts=tuple(puts), deletes=()))
 
     def _load_anchor(self, block_hash: bytes) -> Anchor | None:
         if block_hash == GENESIS_PARENT_HASH:
@@ -1266,15 +1335,27 @@ class TensorPowNode:
     def _invalidate_fruit_dag_cache(self) -> None:
         self._fruit_dag_cache = None
 
+    def _add_fruit_to_dag_cache(self, fruit_hash: bytes, fruit: Fruit) -> None:
+        dag = self._fruit_dag_cache
+        if dag is None:
+            return
+        parents = self._fruit_parents_for_dag(fruit)
+        if parents is None:
+            self._invalidate_fruit_dag_cache()
+            return
+        try:
+            dag.add_fruit(fruit_hash, parents, timestamp_ms=fruit.header.timestamp_ms)
+        except (KeyError, TypeError, ValueError):
+            self._invalidate_fruit_dag_cache()
+
     def _ghostdag_k(self) -> int:
         return DYNAMIC_K_MIN
 
     def _stored_fruit_hashes(self) -> tuple[bytes, ...]:
-        fruit_hashes: list[bytes] = []
-        for block_hash, _body in self.store.items(COLUMN_BODIES):
-            if self._load_fruit(block_hash) is not None:
-                fruit_hashes.append(block_hash)
-        return tuple(sorted(fruit_hashes))
+        return tuple(
+            key[len(FRUIT_KIND_PREFIX) :]
+            for key, _value in self.store.items_with_prefix(COLUMN_DAG, FRUIT_KIND_PREFIX)
+        )
 
     def _best_fruit_tip(self, dag: BlockDAG) -> bytes | None:
         if len(dag) == 0:
@@ -1495,6 +1576,8 @@ class TensorPowNode:
                 )
             self.store.write_batch(StorageBatch(puts=tuple(puts), deletes=tuple(deletes)))
             self._invalidate_fruit_dag_cache()
+            self._branch_state_cache.clear()
+            self._ensure_kind_index()
             self.shard_tree = self.store.get_shard_tree() or ShardTree()
             self.utxo_set = UTXOSet(self.store.utxos())
             self.mempool = self._rebuild_mempool(self.store.mempool_txs())
@@ -1578,8 +1661,62 @@ def write_default_config(path: str | Path, config: TensorPowConfig | None = None
     return target
 
 
+class _MutableUTXOView(Protocol):
+    def get(self, outpoint: Outpoint) -> UTXO | None: ...
+
+    def add(self, utxo: UTXO) -> None: ...
+
+    def remove(self, outpoint: Outpoint) -> UTXO: ...
+
+
+class _OverlayUTXOView:
+    """Copy-on-write view over a UTXO set for validating one fruit without cloning it."""
+
+    def __init__(self, base: UTXOSet) -> None:
+        self._base = base
+        self._added: dict[Outpoint, UTXO] = {}
+        self._removed: set[Outpoint] = set()
+
+    def get(self, outpoint: Outpoint) -> UTXO | None:
+        added = self._added.get(outpoint)
+        if added is not None:
+            return added
+        if outpoint in self._removed:
+            return None
+        return self._base.get(outpoint)
+
+    def add(self, utxo: UTXO) -> None:
+        if self.get(utxo.outpoint) is not None:
+            raise KeyError("outpoint already exists in UTXO view")
+        self._added[utxo.outpoint] = utxo
+
+    def remove(self, outpoint: Outpoint) -> UTXO:
+        utxo = self.get(outpoint)
+        if utxo is None:
+            raise KeyError("outpoint is not present in UTXO view")
+        if outpoint in self._added:
+            del self._added[outpoint]
+        if self._base.get(outpoint) is not None:
+            self._removed.add(outpoint)
+        return utxo
+
+
+def _decode_fruit_body(body: bytes) -> Fruit | None:
+    try:
+        return Fruit.deserialize(body)
+    except (TypeError, ValueError, BlockDecodeError, HeaderDecodeError):
+        return None
+
+
+def _decode_anchor_body(body: bytes) -> Anchor | None:
+    try:
+        return Anchor.deserialize(body)
+    except (TypeError, ValueError, BlockDecodeError, HeaderDecodeError):
+        return None
+
+
 def _apply_spend_tx(
-    utxo_set: UTXOSet,
+    utxo_set: _MutableUTXOView,
     tx: Transaction,
     *,
     shard_tree: ShardTree,

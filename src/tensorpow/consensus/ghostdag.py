@@ -123,7 +123,8 @@ class BlockDAG:
             ancestors.update(self._ancestor_cache[parent])
         self._blocks[block.fruit_hash] = block
         self._ancestor_cache[block.fruit_hash] = frozenset(ancestors)
-        self._metadata_cache.clear()
+        # GHOSTDAG metadata of a block depends only on its own past, and new blocks can
+        # only be appended as children, so cached metadata for existing blocks stays valid.
         return block
 
     def has_block(self, fruit_hash: FruitHash) -> bool:
@@ -157,12 +158,11 @@ class BlockDAG:
         """Return GHOSTDAG metadata for every known fruit at K."""
 
         _require_k(k)
-        cached = self._metadata_cache.get(k)
-        if cached is not None and len(cached) == len(self._blocks):
-            return dict(cached)
+        metadata = self._metadata_cache.setdefault(k, {})
+        if len(metadata) == len(self._blocks):
+            return dict(metadata)
 
-        metadata: dict[FruitHash, GhostdagData] = {}
-        for fruit_hash in self._topological_hashes():
+        for fruit_hash in self._topological_hashes(skip=metadata):
             block = self._blocks[fruit_hash]
             if not block.parents:
                 metadata[fruit_hash] = GhostdagData(
@@ -211,7 +211,6 @@ class BlockDAG:
                 ),
             )
 
-        self._metadata_cache[k] = metadata
         return dict(metadata)
 
     def _select_parent(
@@ -228,13 +227,18 @@ class BlockDAG:
             past.update(self.ancestors(parent))
         return past
 
-    def _topological_hashes(self) -> tuple[FruitHash, ...]:
+    def _topological_hashes(
+        self,
+        *,
+        skip: dict[FruitHash, GhostdagData] | None = None,
+    ) -> tuple[FruitHash, ...]:
+        done = {} if skip is None else skip
         visited: set[FruitHash] = set()
         visiting: set[FruitHash] = set()
         ordered: list[FruitHash] = []
 
         def visit(fruit_hash: FruitHash) -> None:
-            if fruit_hash in visited:
+            if fruit_hash in visited or fruit_hash in done:
                 return
             if fruit_hash in visiting:
                 raise ValueError("fruit DAG contains a cycle")
@@ -246,7 +250,7 @@ class BlockDAG:
             ordered.append(fruit_hash)
 
         for fruit_hash in sorted(
-            self._blocks,
+            (item for item in self._blocks if item not in done),
             key=lambda item: (self._blocks[item].timestamp_ms, item),
         ):
             visit(fruit_hash)

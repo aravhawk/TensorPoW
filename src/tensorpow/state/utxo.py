@@ -236,6 +236,20 @@ class UTXOSet:
     def __contains__(self, outpoint: object) -> bool:
         return isinstance(outpoint, Outpoint) and self.contains(outpoint)
 
+    def copy(self) -> UTXOSet:
+        """Return an independent copy without re-validating or re-sorting entries."""
+
+        clone = UTXOSet()
+        clone._utxos = dict(self._utxos)
+        clone._outpoint_by_key = dict(self._outpoint_by_key)
+        clone._outpoints_by_owner = {
+            owner: set(outpoints) for owner, outpoints in self._outpoints_by_owner.items()
+        }
+        clone._items_cache = self._items_cache
+        clone._key_ints_cache = self._key_ints_cache
+        clone._subtree_cache = dict(self._subtree_cache)
+        return clone
+
     def add(self, utxo: UTXO) -> None:
         """Add one unspent output, rejecting duplicate outpoints."""
 

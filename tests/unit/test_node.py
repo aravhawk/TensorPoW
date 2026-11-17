@@ -1036,7 +1036,7 @@ def test_anchor_history_and_rebuild_use_stored_metadata(
     node.close()
 
 
-def test_fruit_dag_cache_reuses_until_new_fruit(tmp_path: Path) -> None:
+def test_fruit_dag_cache_is_updated_incrementally(tmp_path: Path) -> None:
     node = _node(tmp_path / "node")
     genesis = _genesis_anchor()
     first = _fruit((_coinbase_tx(30).to_bytes(),), latest_anchor=genesis.block_hash())
@@ -1059,9 +1059,14 @@ def test_fruit_dag_cache_reuses_until_new_fruit(tmp_path: Path) -> None:
     assert node.process_fruit(second)
     refreshed_dag = node._fruit_dag()
 
-    assert refreshed_dag is not None
-    assert refreshed_dag is not first_dag
+    assert refreshed_dag is first_dag
     assert refreshed_dag.has_block(second.block_hash())
+    node._invalidate_fruit_dag_cache()
+    rebuilt = node._fruit_dag()
+    assert rebuilt is not None
+    assert rebuilt.ghostdag_metadata(DYNAMIC_K_MIN) == refreshed_dag.ghostdag_metadata(
+        DYNAMIC_K_MIN
+    )
     node.close()
 
 

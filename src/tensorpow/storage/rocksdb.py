@@ -230,6 +230,24 @@ class RocksDBStore:
         column = _require_column(column)
         return self._iter_items(column)
 
+    def items_with_prefix(
+        self,
+        column: StorageColumn,
+        prefix: bytes,
+    ) -> Iterator[tuple[bytes, bytes]]:
+        """Iterate over items whose key starts with ``prefix`` using a seek, not a scan."""
+
+        column = _require_column(column)
+        prefix = _require_bytes("prefix", prefix)
+        return self._iter_prefix(column, prefix)
+
+    def _iter_prefix(self, column: StorageColumn, prefix: bytes) -> Iterator[tuple[bytes, bytes]]:
+        for key, value in self._columns[column].items(from_key=prefix):
+            raw_key = _require_bytes("key", cast(bytes, key))
+            if not raw_key.startswith(prefix):
+                return
+            yield raw_key, _require_bytes("value", cast(bytes, value))
+
     def _iter_items(self, column: StorageColumn) -> Iterator[tuple[bytes, bytes]]:
         for key, value in self._columns[column].items():
             yield (
