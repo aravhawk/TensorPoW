@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any, Final
@@ -9,11 +10,12 @@ from typing import Any, Final
 from tensorpow.crypto.hash import hash_bytes
 from tensorpow.crypto.signatures import ED25519_PRIVATE_KEY_BYTES
 from tensorpow.mempool.shard_tree import ShardId, require_shard_id
+from tensorpow.net.admission import AdmissionConfig, PeerAdmission
 
 WIRE_MAGIC: Final[bytes] = bytes.fromhex("54504f57")
 WIRE_MAGIC_BYTES: Final[int] = 4
 WIRE_CHECKSUM_BYTES: Final[int] = 4
-WIRE_MAX_PAYLOAD_BYTES: Final[int] = 16_777_216
+WIRE_MAX_PAYLOAD_BYTES: Final[int] = 4_194_304
 
 MSG_TYPE_FRUIT: Final[int] = 0x0001
 MSG_TYPE_ANCHOR: Final[int] = 0x0002
@@ -34,14 +36,40 @@ KNOWN_MESSAGE_TYPES: Final[frozenset[int]] = frozenset(
     )
 )
 
-TOPIC_FRUITS: Final[str] = "tensorpow/fruits/main"
-TOPIC_ANCHORS: Final[str] = "tensorpow/anchors/main"
+# Per-type payload ceilings, close to the largest canonical object of each type.
+MAX_FRUIT_WIRE_PAYLOAD_BYTES: Final[int] = 16_384
+MAX_TX_WIRE_PAYLOAD_BYTES: Final[int] = 8_192
+MAX_ANCHOR_WIRE_PAYLOAD_BYTES: Final[int] = 2_097_152
+MAX_PAYLOAD_BYTES_BY_TYPE: Final[dict[int, int]] = {
+    MSG_TYPE_FRUIT: MAX_FRUIT_WIRE_PAYLOAD_BYTES,
+    MSG_TYPE_ANCHOR: MAX_ANCHOR_WIRE_PAYLOAD_BYTES,
+    MSG_TYPE_TX: MAX_TX_WIRE_PAYLOAD_BYTES,
+    MSG_TYPE_GRAPHENE_SKETCH: WIRE_MAX_PAYLOAD_BYTES,
+    MSG_TYPE_ERLAY_SKETCH: WIRE_MAX_PAYLOAD_BYTES,
+    MSG_TYPE_DAS_REQUEST: WIRE_MAX_PAYLOAD_BYTES,
+    MSG_TYPE_DAS_RESPONSE: WIRE_MAX_PAYLOAD_BYTES,
+}
+WIRE_ENVELOPE_OVERHEAD_BYTES: Final[int] = WIRE_MAGIC_BYTES + 2 + 4 + WIRE_CHECKSUM_BYTES
+MAX_GOSSIP_RPC_BYTES: Final[int] = MAX_ANCHOR_WIRE_PAYLOAD_BYTES + 65_536
+
+# Topics are scoped by chain id so mainnet and testnet gossip can never mix.
+TOPIC_CHAIN_MAINNET: Final[str] = "tensorpow-mainnet"
+TOPIC_CHAIN_TESTNET: Final[str] = "tensorpow-testnet"
+TOPIC_CHAINS: Final[frozenset[str]] = frozenset((TOPIC_CHAIN_MAINNET, TOPIC_CHAIN_TESTNET))
+TOPIC_FRUITS_PREFIX: Final[str] = "tensorpow/fruits/"
+TOPIC_ANCHORS_PREFIX: Final[str] = "tensorpow/anchors/"
 TOPIC_TXS_PREFIX: Final[str] = "tensorpow/txs/"
-TOPIC_TXS_SUFFIX: Final[str] = "/main"
+TOPIC_FRUITS: Final[str] = TOPIC_FRUITS_PREFIX + TOPIC_CHAIN_MAINNET
+TOPIC_ANCHORS: Final[str] = TOPIC_ANCHORS_PREFIX + TOPIC_CHAIN_MAINNET
+TOPIC_TXS_SUFFIX: Final[str] = "/" + TOPIC_CHAIN_MAINNET
 
 DEFAULT_GOSSIPSUB_DEGREE: Final[int] = 6
 DEFAULT_GOSSIPSUB_DEGREE_LOW: Final[int] = 4
 DEFAULT_GOSSIPSUB_DEGREE_HIGH: Final[int] = 12
+DEFAULT_MAX_CONNECTIONS: Final[int] = 128
+DEFAULT_MAX_CONNECTIONS_PER_PEER: Final[int] = 2
+
+type PayloadValidator = Callable[[str, int, bytes], bool]
 
 
 class WireDecodeError(ValueError):
@@ -61,7 +89,7 @@ class WireMessage:
 
     def __post_init__(self) -> None:
         _require_message_type(self.message_type)
-        _require_payload(self.payload)
+        _require_payload(self.payload, self.message_type)
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +145,12 @@ class LibP2PNode:
         listen_addrs: tuple[str, ...] = ("/ip4/127.0.0.1/tcp/0",),
         enable_quic: bool = False,
         enable_kademlia: bool = True,
+        chain_id: str = TOPIC_CHAIN_MAINNET,
+        dht_server: bool = False,
+        max_connections: int = DEFAULT_MAX_CONNECTIONS,
+        max_connections_per_peer: int = DEFAULT_MAX_CONNECTIONS_PER_PEER,
+        payload_validator: PayloadValidator | None = None,
+        admission: PeerAdmission | None = None,
     ) -> None:
         if not isinstance(listen_addrs, tuple):
             raise TypeError("listen_addrs must be a tuple")
@@ -131,6 +165,18 @@ class LibP2PNode:
         self.listen_addrs = listen_addrs
         self.enable_quic = _require_bool("enable_quic", enable_quic)
         self.enable_kademlia = _require_bool("enable_kademlia", enable_kademlia)
+        self.chain_id = _require_chain(chain_id)
+        self.dht_server = _require_bool("dht_server", dht_server)
+        self.max_connections = _require_positive_int("max_connections", max_connections)
+        self.max_connections_per_peer = _require_positive_int(
+            "max_connections_per_peer", max_connections_per_peer
+        )
+        self.payload_validator = payload_validator
+        self.admission = (
+            PeerAdmission(AdmissionConfig(malformed_strike_limit=4))
+            if admission is None
+            else admission
+        )
 
         self._host: Any | None = None
         self._pubsub: Any | None = None
@@ -158,11 +204,19 @@ class LibP2PNode:
         services = _async_service_module()
 
         listen_multiaddrs = [multiaddr.Multiaddr(addr) for addr in self.listen_addrs]
+        connection_config = _network_config_module().ConnectionConfig(
+            max_connections=self.max_connections,
+            max_connections_per_peer=self.max_connections_per_peer,
+            min_connections=min(8, self.max_connections),
+            low_watermark=min(16, self.max_connections),
+            high_watermark=max(min(16, self.max_connections), self.max_connections * 3 // 4),
+        )
         host = libp2p.new_host(
             key_pair=self.identity.key_pair(),
             listen_addrs=listen_multiaddrs,
             muxer_preference="YAMUX",
             enable_quic=self.enable_quic,
+            connection_config=connection_config,
         )
         router = gossipsub.GossipSub(
             [gossipsub.PROTOCOL_ID_V12],
@@ -171,14 +225,20 @@ class LibP2PNode:
             DEFAULT_GOSSIPSUB_DEGREE_HIGH,
             heartbeat_interval=1,
         )
-        pubsub = pubsub_module.Pubsub(host, router, strict_signing=False)
+        pubsub = pubsub_module.Pubsub(
+            host,
+            router,
+            strict_signing=True,
+            max_inbound_rpc_size=MAX_GOSSIP_RPC_BYTES,
+        )
 
         exit_stack = AsyncExitStack()
         await exit_stack.enter_async_context(host.run(listen_multiaddrs))
         await exit_stack.enter_async_context(services.background_trio_service(pubsub))
         if self.enable_kademlia:
             kad_module = _kad_dht_module()
-            dht = kad_module.KadDHT(host, kad_module.DHTMode.SERVER)
+            mode = kad_module.DHTMode.SERVER if self.dht_server else kad_module.DHTMode.CLIENT
+            dht = kad_module.KadDHT(host, mode)
             await exit_stack.enter_async_context(services.background_trio_service(dht))
             self._dht = dht
 
@@ -227,11 +287,52 @@ class LibP2PNode:
             raise LibP2PNodeError("Kademlia is disabled")
         return await self._dht.find_peer(peer_id)
 
+    def topic_fruits(self) -> str:
+        return topic_fruits(self.chain_id)
+
+    def topic_anchors(self) -> str:
+        return topic_anchors(self.chain_id)
+
+    def topic_txs(self, shard_id: ShardId) -> str:
+        return topic_for_shard_txs(shard_id, chain_id=self.chain_id)
+
     async def subscribe(self, topic: str) -> None:
-        """Subscribe to a GossipSub topic."""
+        """Subscribe to a GossipSub topic of this node's chain with a gossip validator."""
 
         _require_topic(topic)
-        self._subscriptions[topic] = await self._require_pubsub().subscribe(topic)
+        if topic_chain(topic) != self.chain_id:
+            raise LibP2PNodeError("topic does not belong to this node's chain")
+        pubsub = self._require_pubsub()
+        pubsub.set_topic_validator(topic, self._make_validator(topic), False)
+        self._subscriptions[topic] = await pubsub.subscribe(topic)
+
+    def _make_validator(self, topic: str) -> Callable[[Any, Any], bool]:
+        expected_type = message_type_for_topic(topic)
+
+        def validate(peer_id: Any, message: Any) -> bool:
+            peer = str(peer_id)
+            if self.admission.is_banned(peer):
+                self._blacklist(peer_id)
+                return False
+            if validate_gossip_payload(
+                topic,
+                bytes(message.data),
+                expected_type=expected_type,
+                peer_id=peer,
+                payload_validator=self.payload_validator,
+            ):
+                return True
+            self.admission.strike(peer)
+            if self.admission.is_banned(peer):
+                self._blacklist(peer_id)
+            return False
+
+        return validate
+
+    def _blacklist(self, peer_id: Any) -> None:
+        pubsub = self._pubsub
+        if pubsub is not None and not pubsub.is_peer_blacklisted(peer_id):
+            pubsub.add_to_blacklist(peer_id)
 
     async def publish(self, topic: str, payload: bytes) -> None:
         """Publish payload bytes inside the topic's TensorPoW wire envelope."""
@@ -274,31 +375,90 @@ class LibP2PNode:
         return self._pubsub
 
 
-def topic_for_shard_txs(shard_id: ShardId) -> str:
-    """Return the canonical tx GossipSub topic for a shard."""
+def topic_fruits(chain_id: str = TOPIC_CHAIN_MAINNET) -> str:
+    """Return the fruit GossipSub topic for ``chain_id``."""
+
+    return TOPIC_FRUITS_PREFIX + _require_chain(chain_id)
+
+
+def topic_anchors(chain_id: str = TOPIC_CHAIN_MAINNET) -> str:
+    """Return the anchor GossipSub topic for ``chain_id``."""
+
+    return TOPIC_ANCHORS_PREFIX + _require_chain(chain_id)
+
+
+def topic_for_shard_txs(shard_id: ShardId, *, chain_id: str = TOPIC_CHAIN_MAINNET) -> str:
+    """Return the canonical tx GossipSub topic for a shard on ``chain_id``."""
 
     shard_id = require_shard_id(shard_id)
-    return f"{TOPIC_TXS_PREFIX}{shard_id:08x}{TOPIC_TXS_SUFFIX}"
+    return f"{TOPIC_TXS_PREFIX}{shard_id:08x}/{_require_chain(chain_id)}"
+
+
+def topic_chain(topic: str) -> str:
+    """Return the chain id a canonical topic belongs to."""
+
+    _require_topic(topic)
+    for prefix in (TOPIC_FRUITS_PREFIX, TOPIC_ANCHORS_PREFIX):
+        if topic.startswith(prefix) and topic[len(prefix) :] in TOPIC_CHAINS:
+            return topic[len(prefix) :]
+    parsed = _parse_shard_tx_topic(topic)
+    if parsed is not None:
+        return parsed
+    raise ValueError("topic is not a canonical TensorPoW topic")
 
 
 def message_type_for_topic(topic: str) -> int:
     """Return the expected wire message type for a canonical GossipSub topic."""
 
     _require_topic(topic)
-    if topic == TOPIC_FRUITS:
+    if topic.startswith(TOPIC_FRUITS_PREFIX) and topic[len(TOPIC_FRUITS_PREFIX) :] in TOPIC_CHAINS:
         return MSG_TYPE_FRUIT
-    if topic == TOPIC_ANCHORS:
+    if (
+        topic.startswith(TOPIC_ANCHORS_PREFIX)
+        and topic[len(TOPIC_ANCHORS_PREFIX) :] in TOPIC_CHAINS
+    ):
         return MSG_TYPE_ANCHOR
-    if _is_shard_tx_topic(topic):
+    if _parse_shard_tx_topic(topic) is not None:
         return MSG_TYPE_TX
     raise ValueError("topic has no wire message type")
+
+
+def validate_gossip_payload(
+    topic: str,
+    data: bytes,
+    *,
+    expected_type: int | None = None,
+    peer_id: str = "",
+    payload_validator: PayloadValidator | None = None,
+) -> bool:
+    """Return whether a gossip message may be accepted and forwarded.
+
+    Checks the wire envelope, the topic/message-type binding and the per-type size
+    ceiling, then runs the optional consensus pre-check supplied by the node.
+    """
+
+    try:
+        message_type = message_type_for_topic(topic) if expected_type is None else expected_type
+        if len(data) > MAX_PAYLOAD_BYTES_BY_TYPE[message_type] + WIRE_ENVELOPE_OVERHEAD_BYTES:
+            return False
+        wire_message = decode_wire_message(data)
+    except (TypeError, ValueError, KeyError):
+        return False
+    if wire_message.message_type != message_type:
+        return False
+    if payload_validator is None:
+        return True
+    try:
+        return bool(payload_validator(peer_id, message_type, wire_message.payload))
+    except Exception:
+        return False
 
 
 def encode_wire_message(message_type: int, payload: bytes) -> bytes:
     """Encode one TensorPoW wire message."""
 
     _require_message_type(message_type)
-    _require_payload(payload)
+    _require_payload(payload, message_type)
     return b"".join(
         (
             WIRE_MAGIC,
@@ -328,7 +488,7 @@ def decode_wire_message(data: bytes) -> WireMessage:
         raise WireDecodeError("wire message_type is unknown") from exc
     payload_len_offset = WIRE_MAGIC_BYTES + 2
     payload_len = int.from_bytes(data[payload_len_offset : payload_len_offset + 4], "little")
-    if payload_len > WIRE_MAX_PAYLOAD_BYTES:
+    if payload_len > MAX_PAYLOAD_BYTES_BY_TYPE[message_type]:
         raise WireDecodeError("wire payload exceeds maximum size")
     expected_len = header_len + payload_len + WIRE_CHECKSUM_BYTES
     if len(data) != expected_len:
@@ -351,11 +511,16 @@ def _require_message_type(message_type: int) -> None:
         raise ValueError("message_type is unknown")
 
 
-def _require_payload(payload: bytes) -> None:
+def _require_payload(payload: bytes, message_type: int | None = None) -> None:
     if not isinstance(payload, bytes):
         raise TypeError("payload must be bytes")
-    if len(payload) > WIRE_MAX_PAYLOAD_BYTES:
-        raise ValueError("payload exceeds WIRE_MAX_PAYLOAD_BYTES")
+    limit = (
+        WIRE_MAX_PAYLOAD_BYTES
+        if message_type is None
+        else MAX_PAYLOAD_BYTES_BY_TYPE.get(message_type, WIRE_MAX_PAYLOAD_BYTES)
+    )
+    if len(payload) > limit:
+        raise ValueError("payload exceeds the maximum size for its message type")
 
 
 def _require_topic(topic: str) -> None:
@@ -365,17 +530,31 @@ def _require_topic(topic: str) -> None:
         raise ValueError("topic must not be empty")
 
 
-def _is_shard_tx_topic(topic: str) -> bool:
-    if not topic.startswith(TOPIC_TXS_PREFIX) or not topic.endswith(TOPIC_TXS_SUFFIX):
-        return False
-    encoded = topic[len(TOPIC_TXS_PREFIX) : -len(TOPIC_TXS_SUFFIX)]
-    if len(encoded) != 8:
-        return False
+def _parse_shard_tx_topic(topic: str) -> str | None:
+    if not topic.startswith(TOPIC_TXS_PREFIX):
+        return None
+    encoded, separator, chain_id = topic[len(TOPIC_TXS_PREFIX) :].partition("/")
+    if separator != "/" or chain_id not in TOPIC_CHAINS or len(encoded) != 8:
+        return None
+    if encoded.lower() != encoded:
+        return None
     try:
-        int(encoded, 16)
+        require_shard_id(int(encoded, 16))
     except ValueError:
-        return False
-    return encoded.lower() == encoded
+        return None
+    return chain_id
+
+
+def _require_chain(chain_id: str) -> str:
+    if chain_id not in TOPIC_CHAINS:
+        raise ValueError("chain_id must be a TensorPoW mainnet or testnet chain id")
+    return chain_id
+
+
+def _require_positive_int(name: str, value: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{name} must be a positive int")
+    return value
 
 
 def _require_bool(name: str, value: bool) -> bool:
@@ -406,6 +585,12 @@ def _multiaddr_module() -> Any:
     import multiaddr  # type: ignore[import-untyped]
 
     return multiaddr
+
+
+def _network_config_module() -> Any:
+    from libp2p.network import config
+
+    return config
 
 
 def _gossipsub_module() -> Any:
@@ -446,6 +631,10 @@ def _trio_module() -> Any:
 
 __all__ = [
     "KNOWN_MESSAGE_TYPES",
+    "MAX_ANCHOR_WIRE_PAYLOAD_BYTES",
+    "MAX_FRUIT_WIRE_PAYLOAD_BYTES",
+    "MAX_PAYLOAD_BYTES_BY_TYPE",
+    "MAX_TX_WIRE_PAYLOAD_BYTES",
     "MSG_TYPE_ANCHOR",
     "MSG_TYPE_DAS_REQUEST",
     "MSG_TYPE_DAS_RESPONSE",
@@ -454,6 +643,8 @@ __all__ = [
     "MSG_TYPE_GRAPHENE_SKETCH",
     "MSG_TYPE_TX",
     "TOPIC_ANCHORS",
+    "TOPIC_CHAIN_MAINNET",
+    "TOPIC_CHAIN_TESTNET",
     "TOPIC_FRUITS",
     "TOPIC_TXS_PREFIX",
     "TOPIC_TXS_SUFFIX",
@@ -469,5 +660,9 @@ __all__ = [
     "decode_wire_message",
     "encode_wire_message",
     "message_type_for_topic",
+    "topic_anchors",
+    "topic_chain",
     "topic_for_shard_txs",
+    "topic_fruits",
+    "validate_gossip_payload",
 ]

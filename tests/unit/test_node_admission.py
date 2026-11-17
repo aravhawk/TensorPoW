@@ -250,3 +250,20 @@ def _genesis():  # type: ignore[no-untyped-def]
             founder_pubkey_hash=bytes.fromhex("dd" * 32),
         )
     ).anchor
+
+
+def test_gossip_precheck_rejects_banned_peers_and_undecodable_payloads(tmp_path: Path) -> None:
+    from tensorpow.net import MSG_TYPE_ANCHOR, MSG_TYPE_FRUIT, MSG_TYPE_TX
+
+    genesis = _genesis()
+    node = _node(tmp_path, _CountingVerifier(result=True))
+    try:
+        fruit_bytes = _fruit(1, genesis.block_hash()).serialize()
+        assert node.gossip_precheck("p", MSG_TYPE_FRUIT, fruit_bytes)
+        assert not node.gossip_precheck("p", MSG_TYPE_FRUIT, fruit_bytes[:-1])
+        assert not node.gossip_precheck("p", MSG_TYPE_ANCHOR, fruit_bytes)
+        assert not node.gossip_precheck("p", MSG_TYPE_TX, b"junk")
+        node.admission.ban("p")
+        assert not node.gossip_precheck("p", MSG_TYPE_FRUIT, fruit_bytes)
+    finally:
+        node.close()

@@ -132,7 +132,7 @@ def test_per_shard_separation_and_round_timing_are_independent() -> None:
     right_sketch = state.build_sketch(right, (tx_id,), capacity=1)
 
     assert ERLAY_INTERVAL_MS == 8000
-    assert erlay_topic_for_shard(left) == f"tensorpow/txs/{left:08x}/main"
+    assert erlay_topic_for_shard(left) == f"tensorpow/txs/{left:08x}/tensorpow-mainnet"
     assert left_sketch.to_bytes() != right_sketch.to_bytes()
     with pytest.raises(ErlaySketchError, match="same shard"):
         left_sketch.difference(right_sketch)

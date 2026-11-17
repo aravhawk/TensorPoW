@@ -820,13 +820,33 @@ The wire protocol uses libp2p with:
 - Kademlia peer discovery.
 - Gossipsub 2.0 topic gossip.
 
-Consensus topic names:
+Consensus topic names are scoped by chain id so mainnet and testnet gossip can
+never mix (`chain_id` is `GENESIS_CHAIN_ID_MAINNET` or `GENESIS_CHAIN_ID_TESTNET`):
 
 | Payload | Topic |
 |---|---|
-| Fruits | `TOPIC_FRUITS` |
-| Anchors | `TOPIC_ANCHORS` |
-| Shard transactions | `TOPIC_TXS_PREFIX || shard_id_hex || TOPIC_TXS_SUFFIX` |
+| Fruits | `TOPIC_FRUITS_PREFIX || chain_id` |
+| Anchors | `TOPIC_ANCHORS_PREFIX || chain_id` |
+| Shard transactions | `TOPIC_TXS_PREFIX || shard_id_hex || "/" || chain_id` |
+
+`TOPIC_FRUITS`, `TOPIC_ANCHORS` and `TOPIC_TXS_SUFFIX` in the constants table are
+the mainnet instances.
+
+Gossip MUST use strict message signing. Every subscribed topic MUST have a
+validator that rejects (and does not forward) a message whose envelope fails to
+decode, whose `message_type` does not match the topic, whose payload exceeds the
+per-type ceiling below, or whose consensus payload fails cheap structural
+checks. Invalid messages count against the forwarding peer, and peers that
+exceed the local strike limit are blacklisted. Nodes SHOULD bound total and
+per-peer connections and SHOULD run Kademlia in client mode unless they are
+designated public bootstrap/DHT servers.
+
+| Message | Max payload bytes |
+|---|---:|
+| `MSG_TYPE_FRUIT` | `MAX_FRUIT_WIRE_PAYLOAD_BYTES` |
+| `MSG_TYPE_TX` | `MAX_TX_WIRE_PAYLOAD_BYTES` |
+| `MSG_TYPE_ANCHOR` | `MAX_ANCHOR_WIRE_PAYLOAD_BYTES` |
+| other types | `WIRE_MAX_PAYLOAD_BYTES` |
 
 Messages MUST begin with:
 
@@ -1259,7 +1279,10 @@ roots.
 | `WIRE_MAGIC` | `54504f57` | ASCII `TPOW`. |
 | `WIRE_MAGIC_BYTES` | `4` | Wire magic length. |
 | `WIRE_CHECKSUM_BYTES` | `4` | Payload checksum length. |
-| `WIRE_MAX_PAYLOAD_BYTES` | `16777216` | Max wire payload size. |
+| `WIRE_MAX_PAYLOAD_BYTES` | `4194304` | Max wire payload size for any message type. |
+| `MAX_FRUIT_WIRE_PAYLOAD_BYTES` | `16384` | Max fruit message payload. |
+| `MAX_TX_WIRE_PAYLOAD_BYTES` | `8192` | Max transaction message payload. |
+| `MAX_ANCHOR_WIRE_PAYLOAD_BYTES` | `2097152` | Max anchor message payload. |
 | `MSG_TYPE_FRUIT` | `0x0001` | Fruit wire message. |
 | `MSG_TYPE_ANCHOR` | `0x0002` | Anchor wire message. |
 | `MSG_TYPE_TX` | `0x0003` | Transaction wire message. |
@@ -1276,10 +1299,12 @@ roots.
 | `CODEC_ERLAY` | `0x0003` | Erlay sketch codec. |
 | `CODEC_LEARNED` | `0x0004` | Learned residual codec. |
 | `CODEC_TOPOLOGY` | `0x0005` | Anchor topology codec. |
-| `TOPIC_FRUITS` | `tensorpow/fruits/main` | Fruit gossip topic. |
-| `TOPIC_ANCHORS` | `tensorpow/anchors/main` | Anchor gossip topic. |
+| `TOPIC_FRUITS_PREFIX` | `tensorpow/fruits/` | Fruit gossip topic prefix. |
+| `TOPIC_ANCHORS_PREFIX` | `tensorpow/anchors/` | Anchor gossip topic prefix. |
+| `TOPIC_FRUITS` | `tensorpow/fruits/tensorpow-mainnet` | Mainnet fruit gossip topic. |
+| `TOPIC_ANCHORS` | `tensorpow/anchors/tensorpow-mainnet` | Mainnet anchor gossip topic. |
 | `TOPIC_TXS_PREFIX` | `tensorpow/txs/` | Shard tx topic prefix. |
-| `TOPIC_TXS_SUFFIX` | `/main` | Shard tx topic suffix. |
+| `TOPIC_TXS_SUFFIX` | `/tensorpow-mainnet` | Mainnet shard tx topic suffix. |
 | `RECOMMENDED_BANDWIDTH_BYTES_PER_SEC` | `10000000` | Operator bandwidth recommendation. |
 | `ERLAY_INTERVAL_MS` | `8000` | Erlay reconciliation interval. |
 | `ERLAY_FIELD_BITS` | `64` | Erlay GF field width. |

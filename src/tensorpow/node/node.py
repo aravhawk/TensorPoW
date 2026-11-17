@@ -57,7 +57,7 @@ from tensorpow.mempool import (
     ShardTree,
     burned_fee_matoms,
 )
-from tensorpow.net import LibP2PNode, NodeIdentity
+from tensorpow.net import MSG_TYPE_ANCHOR, MSG_TYPE_FRUIT, MSG_TYPE_TX, LibP2PNode, NodeIdentity
 from tensorpow.node.admission import REASON_POW_VERIFIER_BUSY, AdmissionConfig, PeerAdmission
 from tensorpow.pow.challenge import GENESIS_PARENT_HASH, PowHeader
 from tensorpow.pow.kernel import FRUIT_TARGET_LE, Backend
@@ -360,6 +360,9 @@ class TensorPowNode:
             self.network_node = LibP2PNode(
                 identity=identity,
                 listen_addrs=(f"/ip4/{self.config.listen_host}/tcp/{self.config.p2p_tcp_port}",),
+                chain_id=self.config.chain_id or GENESIS_CHAIN_ID_MAINNET,
+                payload_validator=self.gossip_precheck,
+                admission=self.admission,
             )
             await self.network_node.start()
         self._running = True
@@ -385,6 +388,29 @@ class TensorPowNode:
         """Close persistent storage for tests and short-lived commands."""
 
         self.store.close()
+
+    def gossip_precheck(self, peer_id: str, message_type: int, payload: bytes) -> bool:
+        """Cheap, lock-free gossip validator: banned peers and undecodable payloads fail.
+
+        Full validation (including PoW, rate-limited per peer) happens when the payload
+        is processed; this only stops obviously invalid messages from being forwarded.
+        """
+
+        if self.admission.is_banned(peer_id):
+            return False
+        decoders: dict[int, Callable[[bytes], object]] = {
+            MSG_TYPE_FRUIT: Fruit.deserialize,
+            MSG_TYPE_ANCHOR: Anchor.deserialize,
+            MSG_TYPE_TX: Transaction.from_bytes,
+        }
+        decoder = decoders.get(message_type)
+        if decoder is None:
+            return True
+        try:
+            decoder(payload)
+        except (TypeError, ValueError, BlockDecodeError, HeaderDecodeError, TxDecodeError):
+            return False
+        return True
 
     def process_raw_tx(self, data: bytes) -> tuple[NodeResult, MempoolAddResult | None]:
         """Validate, admit, and persist one inbound transaction."""

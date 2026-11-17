@@ -9,6 +9,7 @@ from tensorpow.net import (
     MSG_TYPE_FRUIT,
     MSG_TYPE_TX,
     TOPIC_FRUITS,
+    WIRE_MAX_PAYLOAD_BYTES,
     LibP2PNode,
     LibP2PNodeError,
     NodeIdentity,
@@ -17,6 +18,16 @@ from tensorpow.net import (
     encode_wire_message,
     message_type_for_topic,
     topic_for_shard_txs,
+)
+from tensorpow.net.libp2p_node import (
+    MAX_FRUIT_WIRE_PAYLOAD_BYTES,
+    MAX_TX_WIRE_PAYLOAD_BYTES,
+    TOPIC_CHAIN_MAINNET,
+    TOPIC_CHAIN_TESTNET,
+    topic_anchors,
+    topic_chain,
+    topic_fruits,
+    validate_gossip_payload,
 )
 
 
@@ -27,7 +38,7 @@ def test_wire_message_round_trip_and_topic_names() -> None:
 
     assert decoded.message_type == MSG_TYPE_FRUIT
     assert decoded.payload == payload
-    assert topic_for_shard_txs(0x00030005) == "tensorpow/txs/00030005/main"
+    assert topic_for_shard_txs(0x00030005) == "tensorpow/txs/00030005/tensorpow-mainnet"
     assert message_type_for_topic(TOPIC_FRUITS) == MSG_TYPE_FRUIT
     assert message_type_for_topic(topic_for_shard_txs(0x00030005)) == MSG_TYPE_TX
 
@@ -130,10 +141,24 @@ class _FakePubSub:
     def __init__(self) -> None:
         self.topic = ""
         self.payload = b""
+        self.validators: dict[str, object] = {}
+        self.blacklisted: set[str] = set()
 
     async def publish(self, topic: str, payload: bytes) -> None:
         self.topic = topic
         self.payload = payload
+
+    def set_topic_validator(self, topic: str, validator: object, _is_async: bool) -> None:
+        self.validators[topic] = validator
+
+    async def subscribe(self, topic: str) -> _FakeSubscription:
+        return _FakeSubscription(topic, b"")
+
+    def is_peer_blacklisted(self, peer_id: str) -> bool:
+        return peer_id in self.blacklisted
+
+    def add_to_blacklist(self, peer_id: str) -> None:
+        self.blacklisted.add(peer_id)
 
 
 class _FakeSubscription:
@@ -145,6 +170,101 @@ class _FakeSubscription:
 
 
 class _FakeMessage:
-    def __init__(self, topic: str, payload: bytes) -> None:
-        self.topicIDs = (topic,)
-        self.data = payload
+    def __init__(self, topic_or_payload: str | bytes, payload: bytes | None = None) -> None:
+        if payload is None:
+            assert isinstance(topic_or_payload, bytes)
+            self.topicIDs: tuple[str, ...] = ()
+            self.data = topic_or_payload
+        else:
+            assert isinstance(topic_or_payload, str)
+            self.topicIDs = (topic_or_payload,)
+            self.data = payload
+
+
+def test_topics_are_chain_scoped_and_legacy_topics_are_rejected() -> None:
+    assert topic_fruits(TOPIC_CHAIN_TESTNET) != topic_fruits(TOPIC_CHAIN_MAINNET)
+    assert topic_anchors(TOPIC_CHAIN_TESTNET).endswith(TOPIC_CHAIN_TESTNET)
+    assert topic_chain(topic_for_shard_txs(0x00030005, chain_id=TOPIC_CHAIN_TESTNET)) == (
+        TOPIC_CHAIN_TESTNET
+    )
+    for legacy in ("tensorpow/fruits/main", "tensorpow/txs/00000000/main", "tensorpow/x/y"):
+        with pytest.raises(ValueError):
+            message_type_for_topic(legacy)
+    with pytest.raises(ValueError):
+        topic_fruits("someothernet")
+
+
+def test_per_type_payload_caps_are_close_to_real_maxima() -> None:
+    assert WIRE_MAX_PAYLOAD_BYTES < 16_777_216
+    with pytest.raises(ValueError, match="maximum size"):
+        encode_wire_message(MSG_TYPE_TX, bytes(MAX_TX_WIRE_PAYLOAD_BYTES + 1))
+    oversized = bytearray(encode_wire_message(MSG_TYPE_TX, b"tx"))
+    oversized[6:10] = (MAX_TX_WIRE_PAYLOAD_BYTES + 1).to_bytes(4, "little")
+    with pytest.raises(WireDecodeError, match="maximum size"):
+        decode_wire_message(bytes(oversized))
+    assert encode_wire_message(MSG_TYPE_FRUIT, bytes(MAX_FRUIT_WIRE_PAYLOAD_BYTES))
+
+
+def test_gossip_validator_checks_envelope_type_size_and_consensus_hook() -> None:
+    seen: list[tuple[str, int, bytes]] = []
+
+    def precheck(peer: str, message_type: int, payload: bytes) -> bool:
+        seen.append((peer, message_type, payload))
+        return payload == b"good"
+
+    topic = topic_fruits()
+    good = encode_wire_message(MSG_TYPE_FRUIT, b"good")
+    assert validate_gossip_payload(topic, good, peer_id="p", payload_validator=precheck)
+    assert not validate_gossip_payload(
+        topic, encode_wire_message(MSG_TYPE_FRUIT, b"bad"), payload_validator=precheck
+    )
+    assert not validate_gossip_payload(topic, encode_wire_message(MSG_TYPE_TX, b"good"))
+    assert not validate_gossip_payload(topic, good[:-1] + bytes([good[-1] ^ 1]))
+    assert not validate_gossip_payload(topic, b"\x00" * (MAX_FRUIT_WIRE_PAYLOAD_BYTES + 64))
+    assert seen[0] == ("p", MSG_TYPE_FRUIT, b"good")
+
+
+def test_invalid_gossip_strikes_and_blacklists_the_forwarding_peer() -> None:
+    node = LibP2PNode(chain_id=TOPIC_CHAIN_TESTNET)
+    pubsub = _FakePubSub()
+    node._pubsub = pubsub
+    topic = node.topic_fruits()
+    validate = node._make_validator(topic)
+    junk = _FakeMessage(encode_wire_message(MSG_TYPE_TX, b"wrong type"))
+
+    results = [validate("attacker", junk) for _ in range(6)]
+
+    assert not any(results)
+    assert pubsub.blacklisted == {"attacker"}
+    assert validate("honest", _FakeMessage(encode_wire_message(MSG_TYPE_FRUIT, b"ok")))
+    assert not validate("attacker", _FakeMessage(encode_wire_message(MSG_TYPE_FRUIT, b"ok")))
+
+
+def test_subscribe_rejects_other_chain_topics_and_registers_validator() -> None:
+    trio.run(_subscribe_rejects_other_chain_topics_and_registers_validator)
+
+
+async def _subscribe_rejects_other_chain_topics_and_registers_validator() -> None:
+    node = LibP2PNode(chain_id=TOPIC_CHAIN_TESTNET)
+    pubsub = _FakePubSub()
+    node._pubsub = pubsub
+    with pytest.raises(LibP2PNodeError, match="chain"):
+        await node.subscribe(topic_fruits(TOPIC_CHAIN_MAINNET))
+    await node.subscribe(node.topic_fruits())
+    assert node.topic_fruits() in pubsub.validators
+
+
+def test_started_host_uses_strict_signing_client_dht_and_connection_limits() -> None:
+    trio.run(_started_host_uses_hardened_defaults)
+
+
+async def _started_host_uses_hardened_defaults() -> None:
+    from libp2p.kad_dht.kad_dht import DHTMode
+
+    async with LibP2PNode(max_connections=32) as node:
+        assert node._pubsub is not None
+        assert node._pubsub.strict_signing is True
+        assert node._dht is not None
+        assert node._dht.mode == DHTMode.CLIENT
+        assert node._host is not None
+        assert node._host.get_network().connection_config.max_connections == 32

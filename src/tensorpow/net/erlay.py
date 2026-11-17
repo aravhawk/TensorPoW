@@ -28,7 +28,7 @@ ERLAY_SKETCH_HEADER_BYTES: Final[int] = (
     len(ERLAY_SKETCH_MAGIC) + U16_BYTES + U16_BYTES + U32_BYTES + U16_BYTES + U16_BYTES
 )
 ERLAY_TOPIC_TXS_PREFIX: Final[str] = "tensorpow/txs/"
-ERLAY_TOPIC_TXS_SUFFIX: Final[str] = "/main"
+ERLAY_TOPIC_TXS_SUFFIX: Final[str] = "/tensorpow-mainnet"
 ERLAY_FIELD_POLY_LOW: Final[int] = 0x1B
 ERLAY_FIELD_MASK: Final[int] = U64_MAX
 ERLAY_SPLIT_SEED_STEP: Final[int] = 0x9E3779B97F4A7C15
@@ -409,11 +409,13 @@ class ErlayPeerState:
         return last_ms + self.interval_ms
 
 
-def erlay_topic_for_shard(shard_id: ShardId) -> str:
-    """Return `TOPIC_TXS_PREFIX || shard_id_hex || TOPIC_TXS_SUFFIX`."""
+def erlay_topic_for_shard(shard_id: ShardId, *, chain_id: str = "tensorpow-mainnet") -> str:
+    """Return `TOPIC_TXS_PREFIX || shard_id_hex || "/" || chain_id`."""
 
     shard_id = require_shard_id(shard_id)
-    return f"{ERLAY_TOPIC_TXS_PREFIX}{shard_id:08x}{ERLAY_TOPIC_TXS_SUFFIX}"
+    if chain_id not in ("tensorpow-mainnet", "tensorpow-testnet"):
+        raise ValueError("chain_id must be a TensorPoW mainnet or testnet chain id")
+    return f"{ERLAY_TOPIC_TXS_PREFIX}{shard_id:08x}/{chain_id}"
 
 
 def _decode_syndromes(syndromes: tuple[int, ...], capacity: int) -> tuple[int, ...]:
