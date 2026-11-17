@@ -1,0 +1,17 @@
+# Version updates for the CI trust root and the locked Python environment.
+# Dependabot *alerts* and security updates are repository settings; see the
+# security PR notes for the steps to enable them.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10

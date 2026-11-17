@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout authorized PR head
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.head_repo }}
           ref: ${{ inputs.head_sha }}
@@ -63,7 +63,7 @@ jobs:
           # the GitHub API a write-access approval of this exact head SHA.
           allow-unsafe-pr-checkout: true
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           # No dependency cache: PR code runs here and could poison main's cache.
           python-version: "3.12"
@@ -87,7 +87,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout authorized PR head
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.head_repo }}
           ref: ${{ inputs.head_sha }}
@@ -96,7 +96,7 @@ jobs:
           # the GitHub API a write-access approval of this exact head SHA.
           allow-unsafe-pr-checkout: true
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           # No dependency cache: PR code runs here and could poison main's cache.
           python-version: "3.12"
@@ -116,7 +116,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout authorized PR head
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.head_repo }}
           ref: ${{ inputs.head_sha }}
@@ -125,7 +125,7 @@ jobs:
           # the GitHub API a write-access approval of this exact head SHA.
           allow-unsafe-pr-checkout: true
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           # No dependency cache: PR code runs here and could poison main's cache.
           python-version: "3.12"
@@ -145,7 +145,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout authorized PR head
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.head_repo }}
           ref: ${{ inputs.head_sha }}
@@ -154,7 +154,7 @@ jobs:
           # the GitHub API a write-access approval of this exact head SHA.
           allow-unsafe-pr-checkout: true
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           # No dependency cache: PR code runs here and could poison main's cache.
           python-version: "3.12"
@@ -198,11 +198,11 @@ jobs:
       # approved-pr-ci.yml (workflow_run), or the same-repo PR merge ref for
       # trusted-pr-ci.yml, whose code only write-access users can push.
       - name: Checkout trusted scripts
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           # No dependency cache next to DAYTONA_API_KEY: approved PR code runs in
           # the default branch's cache scope and could plant a poisoned entry.

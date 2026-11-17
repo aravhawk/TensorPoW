@@ -11,20 +11,21 @@ on:
         default: true
         type: boolean
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   linux-x86-cpu:
     name: Linux x86 CPU
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
           cache: "pip"
@@ -39,14 +40,16 @@ jobs:
 
   linux-arm-cpu:
     name: Linux ARM CPU
+    permissions:
+      contents: read
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
           cache: "pip"
@@ -61,14 +64,16 @@ jobs:
 
   macos-arm-mps:
     name: macOS ARM MPS
+    permissions:
+      contents: read
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
           cache: "pip"
@@ -90,6 +95,8 @@ jobs:
 
   linux-x86-cuda:
     name: Linux x86 CUDA (Daytona H100)
+    permissions:
+      contents: read
     if: ${{ (github.event_name == 'push' && vars.DAYTONA_GPU_SNAPSHOT_READY == 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_cuda) }}
     # Never cancel a running GPU job; a newer pending run replaces an older one.
     concurrency:
@@ -105,11 +112,11 @@ jobs:
       DAYTONA_GPU_QUEUE_TIMEOUT_MINUTES: ${{ vars.DAYTONA_GPU_QUEUE_TIMEOUT_MINUTES }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           # No dependency cache next to DAYTONA_API_KEY: approved PR code runs in
           # the default branch's cache scope and could plant a poisoned entry.

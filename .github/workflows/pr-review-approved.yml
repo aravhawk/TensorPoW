@@ -4,13 +4,14 @@ on:
   pull_request_review:
     types: [submitted]
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   record:
     name: Record approved PR SHA
     if: ${{ github.event.review.state == 'approved' }}
+    # upload-artifact uses the runtime token, not GITHUB_TOKEN.
+    permissions: {}
     runs-on: ubuntu-latest
     steps:
       - name: Write approval metadata
@@ -39,7 +40,7 @@ jobs:
               head_ref: $head_ref
             }' > approval/approval.json
       - name: Upload approval metadata
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: approved-pr-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
           path: approval/approval.json
