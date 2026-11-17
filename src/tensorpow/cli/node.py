@@ -16,12 +16,16 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
-from typing import Final, cast
+from typing import IO, Final, cast
 
 DEFAULT_NODE_DIR: Final[Path] = Path.home() / ".tensorpow" / "node"
 CONFIG_FILENAME: Final[str] = "tensorpow.toml"
 PID_FILENAME: Final[str] = "tensorpow.pid"
 PID_LOCK_FILENAME: Final[str] = f"{PID_FILENAME}.lock"
+# Held (flock LOCK_EX) by the serving process for its whole lifetime. The kernel drops
+# it when that process dies, so a stale pidfile whose PID was reused by an unrelated
+# process can never look like a running node.
+RUN_LOCK_FILENAME: Final[str] = "tensorpow.run.lock"
 STATUS_FILENAME: Final[str] = "status.json"
 PEERS_FILENAME: Final[str] = "peers.json"
 LOG_FILENAME: Final[str] = "node.log"
@@ -187,7 +191,7 @@ def _cmd_stop(args: argparse.Namespace) -> int:
     data_dir = Path(args.data_dir)
     _load_config(data_dir)
     pid = _read_pid(data_dir)
-    was_running = pid is not None and _pid_is_running(pid)
+    was_running = pid is not None and _is_our_node_process(data_dir, pid)
     if was_running and pid is not None:
         os.kill(pid, signal.SIGTERM)
         _wait_until_stopped(pid)
@@ -221,13 +225,26 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     pid = os.getpid()
 
     stop_event = Event()
-    pid_acquired = False
 
     def _handle_signal(_signum: int, _frame: object) -> None:
         stop_event.set()
 
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
+    run_lock = _acquire_run_lock(data_dir)
+    try:
+        return _serve_with_run_lock(data_dir, config, pid, stop_event)
+    finally:
+        run_lock.close()
+
+
+def _serve_with_run_lock(
+    data_dir: Path,
+    config: _NodeConfig,
+    pid: int,
+    stop_event: Event,
+) -> int:
+    pid_acquired = False
     _write_pid(data_dir, pid)
     pid_acquired = True
     _write_status(
@@ -387,10 +404,68 @@ def _running_pid_or_clear_stale(data_dir: Path) -> int | None:
         pid = _read_pid(data_dir)
         if pid is None:
             return None
-        if _pid_is_running(pid):
+        if _pid_is_running(pid) and _run_lock_held(data_dir):
             return pid
         _remove_pid(data_dir)
         return None
+
+
+def _acquire_run_lock(data_dir: Path) -> IO[bytes]:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    handle = (data_dir / RUN_LOCK_FILENAME).open("a+b")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        handle.close()
+        raise NodeCliError("node is already running") from exc
+    return handle
+
+
+def _run_lock_held(data_dir: Path) -> bool:
+    path = data_dir / RUN_LOCK_FILENAME
+    if not path.exists():
+        return False
+    with path.open("a+b") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+
+
+def _is_our_node_process(data_dir: Path, pid: int) -> bool:
+    """Return True only for a live ``_serve`` process of this data dir holding its lock."""
+
+    if not _pid_is_running(pid) or not _run_lock_held(data_dir):
+        return False
+    command_line = _process_command_line(pid)
+    if command_line is None:
+        return False
+    return (
+        "tensorpow.cli.node" in command_line
+        and "_serve" in command_line
+        and str(data_dir) in command_line
+    )
+
+
+def _process_command_line(pid: int) -> str | None:
+    proc_cmdline = Path(f"/proc/{pid}/cmdline")
+    if proc_cmdline.exists():
+        with suppress(OSError):
+            return proc_cmdline.read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    output = completed.stdout.strip()
+    return output or None
 
 
 def _read_pid(data_dir: Path) -> int | None:

@@ -158,7 +158,36 @@ def test_node_cli_init_start_status_peers_stop(tmp_path: Path, capsys: object) -
     assert node_main(["peers", "--data-dir", str(data_dir)]) == 0
     assert _read_stdout(capsys)["peer_count"] == 0
     assert node_main(["stop", "--data-dir", str(data_dir)]) == 0
-    assert not _read_stdout(capsys)["running"]
+    stopped = _read_stdout(capsys)
+    assert not stopped["running"]
+    assert stopped["was_running"]
+
+
+def test_node_stop_never_signals_an_unrelated_process_from_a_stale_pidfile(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    """L-10: a stale pidfile whose PID now belongs to another process is not killed."""
+
+    import subprocess
+    import sys
+
+    data_dir = tmp_path / "data"
+    assert node_main(["init", "--data-dir", str(data_dir)]) == 0
+    _read_stdout(capsys)
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        (data_dir / node_cli.PID_FILENAME).write_text(f"{bystander.pid}\n", encoding="utf-8")
+        assert node_main(["status", "--data-dir", str(data_dir)]) == 0
+        assert not _read_stdout(capsys)["running"]
+
+        (data_dir / node_cli.PID_FILENAME).write_text(f"{bystander.pid}\n", encoding="utf-8")
+        assert node_main(["stop", "--data-dir", str(data_dir)]) == 0
+        assert _read_stdout(capsys)["was_running"] is False
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait(timeout=5)
 
 
 def test_node_pid_file_acquisition_refuses_active_overwrite(
