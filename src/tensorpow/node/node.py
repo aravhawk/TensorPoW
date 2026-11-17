@@ -11,7 +11,13 @@ from pathlib import Path
 from threading import RLock
 from typing import Final
 
-from tensorpow.chain.blocks import PARENT_CANDIDATE_MAX_COUNT, Anchor, BlockDecodeError, Fruit
+from tensorpow.chain.blocks import (
+    PARENT_CANDIDATE_MAX_COUNT,
+    Anchor,
+    BlockDecodeError,
+    FeeFloorEntry,
+    Fruit,
+)
 from tensorpow.chain.headers import HeaderDecodeError
 from tensorpow.consensus.anchor_daa import (
     ANCHOR_INITIAL_TARGET_LE,
@@ -112,6 +118,27 @@ class _AnchorBranchState:
     minted_supply: int
     claimed_fruits: dict[bytes, int]
     confirmed_tx_ids: set[bytes]
+    covered_closure: set[bytes]
+    frontier: set[bytes]
+
+
+@dataclass(frozen=True, slots=True)
+class AnchorTemplate:
+    """Branch-derived anchor body fields a miner must commit for a covered fruit set."""
+
+    parent_anchor: bytes
+    height: int
+    covered_fruit_hashes: tuple[bytes, ...]
+    parent_candidate_hashes: tuple[bytes, ...]
+    shard_tree_bytes: bytes
+    fee_floor_entries: tuple[FeeFloorEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ParentCandidateUpdate:
+    closure_additions: frozenset[bytes]
+    frontier: frozenset[bytes]
+    candidates: tuple[bytes, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,11 +552,6 @@ class TensorPowNode:
         for parent_candidate_hash in anchor.parent_candidate_hashes:
             if self._load_fruit(parent_candidate_hash) is None:
                 return "missing_parent_candidate"
-        canonical_candidates = self._canonical_parent_candidates()
-        if canonical_candidates is None:
-            return "bad_parent_candidate_order"
-        if anchor.parent_candidate_hashes != canonical_candidates:
-            return "bad_parent_candidate_order"
         return None
 
     def _validate_fruit_dependencies(self, fruit: Fruit) -> tuple[str | None, tuple[bytes, ...]]:
@@ -691,6 +713,12 @@ class TensorPowNode:
         ):
             return "bad_fee_floor_entries"
 
+        candidate_update = self._parent_candidate_update(state, anchor.covered_fruit_hashes)
+        if candidate_update is None:
+            return "bad_parent_candidate_order"
+        if anchor.parent_candidate_hashes != candidate_update.candidates:
+            return "bad_parent_candidate_order"
+
         staged = UTXOSet(state.utxo_set.utxos())
         apply_result, _spent_outpoints, _created_utxos, effective_tips, confirmed_tx_ids = (
             self._apply_anchor_fruits(
@@ -728,6 +756,8 @@ class TensorPowNode:
         for fruit_hash in claimed_fruits:
             state.claimed_fruits[fruit_hash] = anchor_height
         state.confirmed_tx_ids.update(confirmed_tx_ids)
+        state.covered_closure.update(candidate_update.closure_additions)
+        state.frontier = set(candidate_update.frontier)
         return None
 
     def _active_chain_batch(self, tip_hash: bytes, state: _AnchorBranchState) -> StorageBatch:
@@ -932,31 +962,85 @@ class TensorPowNode:
             )
         )
 
-    def _canonical_parent_candidates(self) -> tuple[bytes, ...] | None:
+    def _parent_candidate_update(
+        self,
+        state: _AnchorBranchState,
+        covered_fruit_hashes: Iterable[bytes],
+    ) -> _ParentCandidateUpdate | None:
+        """Derive the canonical parent-candidate list from committed branch data only.
+
+        The candidate set is the frontier of the past-closure of every fruit covered by
+        the anchor chain ending at this anchor. It depends only on the covered fruits,
+        their (stored, PoW-checked) ancestry and the parent branch state, so every node
+        that can validate the anchor derives the same list regardless of which other
+        fruits it happens to hold.
+        """
+
         dag = self._fruit_dag()
         if dag is None:
             return None
-        if len(dag) == 0:
-            return ()
-
+        closure = state.covered_closure
+        additions: set[bytes] = set()
+        stack = [fruit_hash for fruit_hash in covered_fruit_hashes if fruit_hash not in closure]
+        while stack:
+            fruit_hash = stack.pop()
+            if fruit_hash in additions or fruit_hash in closure:
+                continue
+            if not dag.has_block(fruit_hash):
+                return None
+            additions.add(fruit_hash)
+            stack.extend(
+                parent
+                for parent in dag.get_block(fruit_hash).parents
+                if parent not in closure and parent not in additions
+            )
         referenced: set[bytes] = set()
-        fruit_hashes = self._stored_fruit_hashes()
-        for fruit_hash in fruit_hashes:
-            fruit = self._load_fruit(fruit_hash)
-            if fruit is None:
-                return None
-            parents = self._fruit_parents_for_dag(fruit)
-            if parents is None:
-                return None
-            referenced.update(parents)
-        frontier = set(fruit_hashes) - referenced
+        for fruit_hash in additions:
+            referenced.update(dag.get_block(fruit_hash).parents)
+        frontier = (state.frontier | additions) - referenced
+        if not frontier:
+            return _ParentCandidateUpdate(frozenset(additions), frozenset(), ())
         metadata = dag.ghostdag_metadata(self._ghostdag_k())
-        return tuple(
+        candidates = tuple(
             sorted(
                 frontier,
                 key=lambda fruit_hash: (-metadata[fruit_hash].blue_score, fruit_hash),
             )[:PARENT_CANDIDATE_MAX_COUNT]
         )
+        return _ParentCandidateUpdate(frozenset(additions), frozenset(frontier), candidates)
+
+    def anchor_template(
+        self,
+        parent_anchor: bytes,
+        covered_fruit_hashes: Iterable[bytes],
+    ) -> AnchorTemplate:
+        """Return the branch-derived body fields for an anchor on ``parent_anchor``.
+
+        Anchor miners use this to fill ``parent_candidate_hashes`` and the shard-tree and
+        fee-floor commitments that consensus recomputes for the covered fruit set.
+        """
+
+        with self._state_lock:
+            _require_hash("parent_anchor", parent_anchor)
+            covered = tuple(sorted(set(covered_fruit_hashes)))
+            parent_meta = self._anchor_meta(parent_anchor)
+            state = self._rebuild_anchor_branch_state(parent_anchor)
+            if parent_meta is None or state is None:
+                raise ValueError("parent_anchor is unknown or invalid")
+            update = self._parent_candidate_update(state, covered)
+            if update is None:
+                raise ValueError("covered fruits are unknown")
+            return AnchorTemplate(
+                parent_anchor=parent_anchor,
+                height=parent_meta.height + 1,
+                covered_fruit_hashes=covered,
+                parent_candidate_hashes=update.candidates,
+                shard_tree_bytes=state.shard_tree.serialize(),
+                fee_floor_entries=tuple(
+                    FeeFloorEntry(shard_id, state.fee_floors.get(shard_id, 0))
+                    for shard_id in state.shard_tree.leaf_shard_ids
+                ),
+            )
 
     def _fruit_dag(self) -> BlockDAG | None:
         if self._fruit_dag_cache is not None:
@@ -1515,6 +1599,8 @@ def _empty_anchor_branch_state() -> _AnchorBranchState:
         minted_supply=0,
         claimed_fruits={},
         confirmed_tx_ids=set(),
+        covered_closure=set(),
+        frontier=set(),
     )
 
 
@@ -1674,6 +1760,7 @@ __all__ = [
     "DEFAULT_P2P_TCP_PORT",
     "DEFAULT_RPC_HOST",
     "DEFAULT_RPC_PORT",
+    "AnchorTemplate",
     "NodeResult",
     "TensorPowConfig",
     "TensorPowNode",

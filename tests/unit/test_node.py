@@ -545,7 +545,6 @@ def test_anchor_timestamp_rejects_median_time_past_regression(
 
     monkeypatch.setattr(node, "_anchor_history", lambda _tip_hash, *, limit=None: history)
     monkeypatch.setattr(node, "_load_fruit", lambda _fruit_hash: dummy_fruit)
-    monkeypatch.setattr(node, "_canonical_parent_candidates", lambda: (covered_fruit_hash,))
 
     assert node._validate_anchor_dependencies(anchor) == "anchor_time_too_old"
     node.close()
@@ -565,6 +564,104 @@ def test_anchor_parent_candidates_must_match_canonical_frontier(tmp_path: Path) 
     assert node.process_fruit(fruit)
     assert node.process_anchor(anchor).reason == "bad_parent_candidate_order"
     node.close()
+
+
+def test_anchor_validity_does_not_depend_on_locally_held_extra_fruits(tmp_path: Path) -> None:
+    """C-1 / repro R3: an anchor is valid or invalid identically on every node."""
+
+    genesis = _genesis_anchor()
+    shared = _fruit((_coinbase_tx(40).to_bytes(),), latest_anchor=genesis.block_hash())
+    extra = _fruit(
+        (_coinbase_tx(41).to_bytes(),),
+        latest_anchor=genesis.block_hash(),
+        parent_selected=shared.block_hash(),
+        timestamp_ms=2,
+        nonce=41,
+    )
+    anchor = _anchor(shared.block_hash(), parent_anchor=genesis.block_hash(), timestamp_ms=3)
+
+    node_a = _node(tmp_path / "a")
+    node_b = _node(tmp_path / "b")
+    try:
+        for node in (node_a, node_b):
+            assert node.process_anchor(genesis)
+            assert node.process_fruit(shared)
+        assert node_b.process_fruit(extra)
+
+        result_a = node_a.process_anchor(anchor)
+        result_b = node_b.process_anchor(anchor)
+
+        assert result_a.accepted, result_a.reason
+        assert result_b.accepted, result_b.reason
+        assert node_a.utxo_set.merkle_root() == node_b.utxo_set.merkle_root()
+    finally:
+        node_a.close()
+        node_b.close()
+
+
+def test_parent_candidates_are_frontier_of_covered_past_across_anchors(tmp_path: Path) -> None:
+    node = _node(tmp_path / "node")
+    genesis = _genesis_anchor()
+    root = _fruit((_coinbase_tx(42).to_bytes(),), latest_anchor=genesis.block_hash())
+    first_anchor = _anchor(root.block_hash(), parent_anchor=genesis.block_hash(), timestamp_ms=2)
+    left = _fruit(
+        (_coinbase_tx(43).to_bytes(),),
+        latest_anchor=first_anchor.block_hash(),
+        parent_selected=root.block_hash(),
+        timestamp_ms=3,
+        nonce=43,
+    )
+    right = _fruit(
+        (_coinbase_tx(44).to_bytes(),),
+        latest_anchor=first_anchor.block_hash(),
+        parent_selected=root.block_hash(),
+        timestamp_ms=4,
+        nonce=44,
+    )
+    uncovered = _fruit(
+        (_coinbase_tx(45).to_bytes(),),
+        latest_anchor=first_anchor.block_hash(),
+        parent_selected=left.block_hash(),
+        timestamp_ms=5,
+        nonce=45,
+    )
+    try:
+        assert node.process_anchor(genesis)
+        assert node.process_fruit(root)
+        assert node.process_anchor(first_anchor)
+        assert node.process_fruit(left)
+        assert node.process_fruit(right)
+        assert node.process_fruit(uncovered)
+
+        template = node.anchor_template(
+            first_anchor.block_hash(),
+            (left.block_hash(), right.block_hash()),
+        )
+        assert set(template.parent_candidate_hashes) == {left.block_hash(), right.block_hash()}
+        assert uncovered.block_hash() not in template.parent_candidate_hashes
+        assert template.parent_candidate_hashes == tuple(sorted(template.parent_candidate_hashes))
+
+        local_frontier_anchor = _anchor_many(
+            (left.block_hash(), right.block_hash()),
+            parent_anchor=first_anchor.block_hash(),
+            parent_candidate_hashes=(uncovered.block_hash(), right.block_hash()),
+            timestamp_ms=6,
+        )
+        assert node.process_anchor(local_frontier_anchor).reason == "bad_parent_candidate_order"
+
+        second_anchor = _anchor_many(
+            (left.block_hash(), right.block_hash()),
+            parent_anchor=first_anchor.block_hash(),
+            parent_candidate_hashes=template.parent_candidate_hashes,
+            timestamp_ms=6,
+        )
+        assert node.process_anchor(second_anchor).accepted
+
+        # Only ``right`` stays on the frontier once ``uncovered`` (child of ``left``) is covered.
+        third = node.anchor_template(second_anchor.block_hash(), (uncovered.block_hash(),))
+        assert set(third.parent_candidate_hashes) == {right.block_hash(), uncovered.block_hash()}
+    finally:
+        node.close()
 
 
 def test_competing_anchor_height_comes_from_parent_chain(tmp_path: Path) -> None:

@@ -318,8 +318,22 @@ Each fee-floor entry is:
 | `floor_matoms_per_kb` | `uint64` | `U64_BYTES` | Any value in `uint64` range. |
 
 `parent_candidate_hashes` are the selected frontier a miner may additionally
-reference in subsequent fruit headers. The list is sorted by descending blue
-score, then ascending fruit hash, and truncated to `PARENT_CANDIDATE_MAX_COUNT`.
+reference in subsequent fruit headers. The list MUST be derived only from data
+the anchor commits to, never from the validating node's full local fruit set:
+
+1. Let `C(A)` be the past-closure of every fruit covered by anchor `A` and by
+   every ancestor anchor of `A`: each covered fruit plus all of its fruit
+   ancestors through effective parent edges. `C(genesis)` is empty.
+2. The frontier `F(A)` is every fruit in `C(A)` that is not an effective parent
+   of another fruit in `C(A)`. Equivalently, with `N = C(A) \ C(parent(A))`,
+   `F(A) = (F(parent(A)) ∪ N) \ parents(N)`.
+3. The list is `F(A)` sorted by descending GHOSTDAG blue score (which depends
+   only on each fruit's own past), then ascending fruit hash, truncated to
+   `PARENT_CANDIDATE_MAX_COUNT`.
+
+Fruits that are known to a node but are neither covered by the anchor chain nor
+ancestors of covered fruits MUST NOT affect the list. Two nodes that can both
+validate an anchor therefore always agree on its candidate list.
 
 The fee-floor set root is the ordered Merkle root of canonical fee-floor entries
 using `DOMAIN_FEE_FLOOR`. The shard tree root is
