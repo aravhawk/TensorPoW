@@ -41,6 +41,13 @@ tensorpow-mine = "tensorpow.cli.mine:main"
 tensorpow-node = "tensorpow.cli.node:main"
 tensorpow-wallet = "tensorpow.cli.wallet:main"
 
+[tool.uv]
+# Floors for security-relevant transitive dependencies (see SECURITY notes in PRs).
+constraint-dependencies = [
+    "dnspython>=2.9.2",
+    "zeroconf>=0.149.16",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
