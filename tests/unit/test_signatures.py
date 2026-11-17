@@ -33,6 +33,12 @@ RFC8032_TEST1_SIGNATURE = bytes.fromhex(
 )
 
 
+# A genuine public key and an encoding-valid signature shape (R = a real point, S = 0),
+# for tests that stub the curve verification itself.
+_REAL_KEY = bytes.fromhex("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c")
+_NEUTRAL_SIGNATURE = _REAL_KEY + bytes(32)
+
+
 def _corrupt(value: bytes) -> bytes:
     return bytes((value[0] ^ 0x01,)) + value[1:]
 
@@ -135,9 +141,9 @@ def test_verify_batch_short_circuits_after_first_rejection(monkeypatch: pytest.M
 
     assert not verify_batch(
         [
-            (b"message-0", b"good".ljust(ED25519_SIGNATURE_BYTES, b"\x00"), bytes(32)),
-            (b"message-1", b"bad".ljust(ED25519_SIGNATURE_BYTES, b"\x00"), bytes(32)),
-            (b"message-2", b"good".ljust(ED25519_SIGNATURE_BYTES, b"\x00"), bytes(32)),
+            (b"message-0", b"good".ljust(ED25519_SIGNATURE_BYTES, b"\x00"), _REAL_KEY),
+            (b"message-1", b"bad".ljust(ED25519_SIGNATURE_BYTES, b"\x00"), _REAL_KEY),
+            (b"message-2", b"good".ljust(ED25519_SIGNATURE_BYTES, b"\x00"), _REAL_KEY),
         ]
     )
     assert calls == 2
@@ -159,9 +165,9 @@ def test_verify_batch_reuses_loaded_public_keys(monkeypatch: pytest.MonkeyPatch)
 
     assert verify_batch(
         [
-            (b"message-0", bytes(ED25519_SIGNATURE_BYTES), bytes(ED25519_PUBLIC_KEY_BYTES)),
-            (b"message-1", bytes(ED25519_SIGNATURE_BYTES), bytes(ED25519_PUBLIC_KEY_BYTES)),
-            (b"message-2", bytes(ED25519_SIGNATURE_BYTES), bytes(ED25519_PUBLIC_KEY_BYTES)),
+            (b"message-0", _NEUTRAL_SIGNATURE, _REAL_KEY),
+            (b"message-1", _NEUTRAL_SIGNATURE, _REAL_KEY),
+            (b"message-2", _NEUTRAL_SIGNATURE, _REAL_KEY),
         ]
     )
     assert loads == 1
@@ -200,3 +206,74 @@ def test_verify_by_sig_type_uses_dispatch_table(monkeypatch: pytest.MonkeyPatch)
 
     assert verify_by_sig_type(42, b"message", b"signature", b"public")
     assert not verify_by_sig_type(42, b"wrong", b"signature", b"public")
+
+
+def _edwards_add(p1: tuple[int, int], p2: tuple[int, int]) -> tuple[int, int]:
+    field = 2**255 - 19
+    d = (-121665 * pow(121666, field - 2, field)) % field
+    (x1, y1), (x2, y2) = p1, p2
+    common = d * x1 * x2 * y1 * y2 % field
+    x3 = (x1 * y2 + x2 * y1) * pow(1 + common, field - 2, field) % field
+    y3 = (y1 * y2 + x1 * x2) * pow(1 - common, field - 2, field) % field
+    return x3, y3
+
+
+def _decode_point(encoded: bytes) -> tuple[int, int] | None:
+    field = 2**255 - 19
+    d = (-121665 * pow(121666, field - 2, field)) % field
+    y = int.from_bytes(encoded, "little") & ((1 << 255) - 1)
+    sign = encoded[31] >> 7
+    if y >= field:
+        return None
+    x2 = (y * y - 1) * pow(d * y * y + 1, field - 2, field) % field
+    x = pow(x2, (field + 3) // 8, field)
+    if (x * x - x2) % field:
+        x = x * pow(2, (field - 1) // 4, field) % field
+    if (x * x - x2) % field:
+        return None
+    if x % 2 != sign:
+        x = (field - x) % field
+    return x, y
+
+
+def test_small_order_blocklist_matches_curve_arithmetic() -> None:
+    """I-2: every blocklisted encoding really is a small-order point (8P == identity)."""
+
+    from tensorpow.crypto import signatures as module
+
+    for masked in module._SMALL_ORDER_ENCODINGS_MASKED:
+        for sign_bit in (0, 0x80):
+            encoded = masked[:31] + bytes((masked[31] | sign_bit,))
+            point = _decode_point(encoded)
+            if point is None:
+                continue
+            accumulator = (0, 1)
+            for _ in range(8):
+                accumulator = _edwards_add(accumulator, point)
+            assert accumulator == (0, 1)
+    honest = Keypair.generate()
+    assert module.strict_encoding_ok(sign(b"m", honest.private_key), honest.public_key)
+
+
+def test_non_canonical_and_small_order_encodings_are_rejected() -> None:
+    """I-2: acceptance does not depend on OpenSSL's choices for edge-case encodings."""
+
+    from tensorpow.crypto import signatures as module
+
+    keypair = Keypair.generate()
+    message = b"edge cases"
+    signature = sign(message, keypair.private_key)
+    assert verify(message, signature, keypair.public_key)
+
+    s_value = int.from_bytes(signature[32:], "little")
+    malleated = signature[:32] + (s_value + module.ED25519_GROUP_ORDER).to_bytes(32, "little")
+    assert not verify(message, malleated, keypair.public_key)
+
+    identity = bytes.fromhex("01" + "00" * 31)
+    assert not verify(message, signature, identity)
+    assert not verify(message, identity + bytes(32), keypair.public_key)
+    non_canonical_y = (2**255 - 19 + 1).to_bytes(32, "little")
+    assert not module.strict_encoding_ok(signature, non_canonical_y)
+    order_two_signed = bytes.fromhex("ec" + "ff" * 31)
+    assert not module.strict_encoding_ok(signature, order_two_signed)
+    assert not verify_batch([(message, signature, identity)])

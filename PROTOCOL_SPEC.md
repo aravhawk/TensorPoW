@@ -81,6 +81,15 @@ SIG_DISPATCH = {
 Unknown signature types MUST fail validation. `SIG_TYPE_ML_DSA_RESERVED` is a
 reserved identifier and MUST NOT validate before a hardfork activates it.
 
+Ed25519 acceptance is defined explicitly rather than by any library's edge-case
+behaviour. In addition to RFC 8032 cofactorless verification, a signature MUST be
+rejected when:
+
+- `S` (bytes 32..63 of the signature, little-endian) is `>= L`, the group order;
+- the public key `A` or the signature's `R` (bytes 0..31) is a non-canonical point
+  encoding (the 255-bit `y` value is `>= p = 2^255 - 19`);
+- `A` or `R` is a small-order point (order 1, 2, 4 or 8).
+
 Signature verification MUST use a constant-time library implementation. Batch
 verification MAY be used, but the result MUST be identical to verifying each
 signature independently and rejecting if any item fails. Batch verification is a
