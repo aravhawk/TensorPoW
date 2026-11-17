@@ -421,9 +421,9 @@ def _pubsub_module() -> Any:
 
 
 def _async_service_module() -> Any:
-    from libp2p.tools import async_service
+    from libp2p.tools import anyio_service
 
-    return async_service
+    return anyio_service
 
 
 def _kad_dht_module() -> Any:
