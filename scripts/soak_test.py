@@ -821,6 +821,7 @@ def _anchor(
         anchor_reward_root=anchor_reward_root(()),
         timestamp_ms=_anchor_timestamp_ms(step, anchor_interval),
         nonce=step,
+        utxo_state_root=template.utxo_state_root,
     )
     return Anchor(
         header=header,

@@ -181,6 +181,7 @@ class AnchorTemplate:
     parent_candidate_hashes: tuple[bytes, ...]
     shard_tree_bytes: bytes
     fee_floor_entries: tuple[FeeFloorEntry, ...]
+    utxo_state_root: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -933,6 +934,8 @@ class TensorPowNode:
             return "bad_anchor_transition"
         if anchor.parent_candidate_hashes != candidate_update.candidates:
             return "bad_parent_candidate_order"
+        if anchor.header.utxo_state_root != state.utxo_set.merkle_root():
+            return "bad_utxo_state_root"
         if anchor.shard_tree_bytes != policy.tree.serialize():
             return "bad_shard_tree"
         if anchor.fee_floor_entries != _fee_floor_entries(policy):
@@ -1307,6 +1310,7 @@ class TensorPowNode:
                 parent_candidate_hashes=transition.candidate_update.candidates,
                 shard_tree_bytes=transition.policy.tree.serialize(),
                 fee_floor_entries=_fee_floor_entries(transition.policy),
+                utxo_state_root=state.utxo_set.merkle_root(),
             )
 
     def _fruit_dag(self) -> BlockDAG | None:

@@ -165,6 +165,7 @@ anchor_pow_preimage =
     shard_tree_state_root ||
     fee_floor_set_root ||
     anchor_reward_root ||
+    utxo_state_root ||
     timestamp_ms_u64_le ||
     nonce_u64_le
 ```
@@ -298,8 +299,17 @@ Anchor header byte layout:
 | `shard_tree_state_root` | hash | `HASH_LEN_BYTES` | MUST equal serialized shard tree commitment. |
 | `fee_floor_set_root` | hash | `HASH_LEN_BYTES` | MUST equal serialized fee-floor commitment. |
 | `anchor_reward_root` | hash | `HASH_LEN_BYTES` | MUST equal root of anchor reward outputs. |
+| `utxo_state_root` | hash | `HASH_LEN_BYTES` | MUST equal the section-8 UTXO root after applying the parent anchor; the empty-set root in genesis. |
 | `timestamp_ms` | `uint64` | `U64_BYTES` | MUST pass timestamp rules in section 7. |
 | `nonce` | `uint64` | `U64_BYTES` | Any value in `uint64` range. |
+
+`utxo_state_root` commits the post-state of the *parent* anchor (the state the
+anchor's covered fruits are validated against). It does not commit this
+anchor's own result, which would be circular because anchor reward outpoints
+are derived from this anchor's hash. The field is bound by the anchor PoW
+preimage, so a syncing node can take the UTXO root at anchor `N - 1` from the
+PoW-verified header of anchor `N` and MUST NOT accept a snapshot or diff whose
+root differs from it.
 
 ### Anchor Body
 
@@ -547,6 +557,11 @@ empty_hash(depth) = BLAKE3(DOMAIN_MERKLE_EMPTY || depth_u16_le)
 Inclusion and non-inclusion proofs MUST verify against the root using only
 canonical node encodings. A proof with duplicate siblings, wrong depth, or
 non-canonical side markers is invalid.
+
+State sync (UTXO snapshots or diffs) MUST verify the resulting UTXO root against
+an `utxo_state_root` taken from a PoW-verified anchor header on the selected
+chain. A root supplied by the serving peer, including the target root inside a
+diff, is untrusted.
 
 ---
 
@@ -1093,7 +1108,8 @@ genesis_commitment = BLAKE3(
 
 The genesis anchor uses `GENESIS_PARENT_HASH` as `parent_anchor`, empty fruit
 set root, empty parent candidate root, root shard tree, zero fee floor for the
-root shard, and the computed `genesis_commitment` field in its body. Genesis
+root shard, the empty UTXO root as `utxo_state_root`, and the computed
+`genesis_commitment` field in its body. Genesis
 creates no UTXO and pays no reward.
 
 The genesis anchor hash is `BLAKE3(serialized_genesis_anchor)` so the chain ID,

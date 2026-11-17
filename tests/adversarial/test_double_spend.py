@@ -18,7 +18,7 @@ from tensorpow.crypto.hash import hash_bytes
 from tensorpow.mempool import ROOT_SHARD_ID, ShardTree
 from tensorpow.node import TensorPowConfig, TensorPowNode
 from tensorpow.pow.challenge import FORMAT_EPOCH, GENESIS_PARENT_HASH
-from tensorpow.state.utxo import TEMPLATE_PKH, UTXO, Outpoint
+from tensorpow.state.utxo import EMPTY_UTXO_ROOT, TEMPLATE_PKH, UTXO, Outpoint
 from tensorpow.tx.transaction import Output
 from tests.adversarial._helpers import (
     OWNER_PUBKEY_HASH,
@@ -121,8 +121,10 @@ def _anchor_for_fruits(
     fee_entries = (FeeFloorEntry(ROOT_SHARD_ID, 0),)
     covered = tuple(sorted(fruit_.block_hash() for fruit_ in fruits))
     parent_candidates = covered
+    utxo_state_root = EMPTY_UTXO_ROOT
     if node is not None:
         template = node.anchor_template(parent_anchor, covered)
+        utxo_state_root = template.utxo_state_root
         tree = ShardTree.deserialize(template.shard_tree_bytes)
         fee_entries = template.fee_floor_entries
         parent_candidates = template.parent_candidate_hashes
@@ -136,6 +138,7 @@ def _anchor_for_fruits(
         anchor_reward_root=anchor_reward_root(anchor_reward_outputs),
         timestamp_ms=max(fruit_.header.timestamp_ms for fruit_ in fruits) + 1,
         nonce=99,
+        utxo_state_root=utxo_state_root,
     )
     return Anchor(
         header=header,

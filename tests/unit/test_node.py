@@ -37,7 +37,7 @@ from tensorpow.node import TensorPowConfig, TensorPowNode, write_default_config
 from tensorpow.pow.challenge import FORMAT_EPOCH, GENESIS_PARENT_HASH, pow_preimage
 from tensorpow.pow.kernel import FRUIT_TARGET_LE
 from tensorpow.pow.verify import verify_pow
-from tensorpow.state.utxo import MAX_SUPPLY_MATOMS, TEMPLATE_PKH, UTXO, Outpoint
+from tensorpow.state.utxo import EMPTY_UTXO_ROOT, MAX_SUPPLY_MATOMS, TEMPLATE_PKH, UTXO, Outpoint
 from tensorpow.storage import COLUMN_MEMPOOL
 from tensorpow.tx.transaction import Output, Transaction
 from tensorpow.wallet import Wallet
@@ -468,6 +468,7 @@ def test_anchor_cannot_zero_a_fee_floor_earned_by_confirmed_fees(
             parent_anchor=funding_anchor.block_hash(),
             fee_floor_matoms_per_kb=0,
             timestamp_ms=4,
+            utxo_state_root=template.utxo_state_root,
         )
         assert node.process_anchor(zeroed).reason == "bad_fee_floor_entries"
         canonical = _canonical_anchor(
@@ -511,6 +512,82 @@ def test_anchor_cannot_reshape_shard_tree_without_sustained_load(tmp_path: Path)
         assert node.shard_tree == ShardTree()
     finally:
         node.close()
+
+
+def test_anchor_commits_parent_post_state_utxo_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-9: the UTXO root is committed in the PoW-bound anchor header and checked."""
+
+    node = _node(tmp_path / "node")
+    genesis = _genesis_anchor()
+    first = _fruit((_coinbase_tx(75).to_bytes(),), latest_anchor=genesis.block_hash())
+    try:
+        assert node.process_anchor(genesis)
+        assert node.process_fruit(first)
+        first_anchor = _canonical_anchor(
+            node, (first.block_hash(),), parent_anchor=genesis.block_hash()
+        )
+        assert first_anchor.header.utxo_state_root == EMPTY_UTXO_ROOT
+        assert node.process_anchor(first_anchor)
+        post_state_root = node.utxo_set.merkle_root()
+        assert post_state_root != EMPTY_UTXO_ROOT
+
+        second = _fruit(
+            (_coinbase_tx(76).to_bytes(),),
+            latest_anchor=first_anchor.block_hash(),
+            parent_selected=first.block_hash(),
+            timestamp_ms=3,
+            nonce=76,
+        )
+        assert node.process_fruit(second)
+        template = node.anchor_template(first_anchor.block_hash(), (second.block_hash(),))
+        assert template.utxo_state_root == post_state_root
+
+        lying = _anchor_many(
+            (second.block_hash(),),
+            parent_anchor=first_anchor.block_hash(),
+            parent_candidate_hashes=template.parent_candidate_hashes,
+            timestamp_ms=4,
+            utxo_state_root=bytes([9]) * HASH_LEN_BYTES,
+        )
+        assert node.process_anchor(lying).reason == "bad_utxo_state_root"
+        honest = _canonical_anchor(
+            node, (second.block_hash(),), parent_anchor=first_anchor.block_hash(), timestamp_ms=4
+        )
+        assert node.process_anchor(honest).accepted
+        assert pow_preimage(lying.header.to_pow_header()) != pow_preimage(
+            honest.header.to_pow_header()
+        )
+    finally:
+        node.close()
+
+
+def test_genesis_anchor_must_commit_empty_utxo_root() -> None:
+    genesis = _genesis_anchor()
+    assert genesis.header.utxo_state_root == EMPTY_UTXO_ROOT
+    forged_header = AnchorHeader(
+        version=genesis.header.version,
+        parent_anchor=genesis.header.parent_anchor,
+        fruit_set_root=genesis.header.fruit_set_root,
+        parent_candidate_root=genesis.header.parent_candidate_root,
+        shard_tree_state_root=genesis.header.shard_tree_state_root,
+        fee_floor_set_root=genesis.header.fee_floor_set_root,
+        anchor_reward_root=genesis.header.anchor_reward_root,
+        timestamp_ms=genesis.header.timestamp_ms,
+        nonce=genesis.header.nonce,
+        utxo_state_root=bytes([1]) * HASH_LEN_BYTES,
+    )
+    with pytest.raises(ValueError, match="empty UTXO root"):
+        Anchor(
+            header=forged_header,
+            covered_fruit_hashes=(),
+            parent_candidate_hashes=(),
+            shard_tree_bytes=genesis.shard_tree_bytes,
+            fee_floor_entries=genesis.fee_floor_entries,
+            genesis_commitment=genesis.genesis_commitment,
+        )
 
 
 def test_anchor_reward_outputs_are_committed_and_claimed(tmp_path: Path) -> None:
@@ -959,6 +1036,7 @@ def test_parent_candidates_are_frontier_of_covered_past_across_anchors(tmp_path:
             parent_anchor=first_anchor.block_hash(),
             parent_candidate_hashes=template.parent_candidate_hashes,
             timestamp_ms=6,
+            utxo_state_root=template.utxo_state_root,
         )
         assert node.process_anchor(second_anchor).accepted
 
@@ -1104,11 +1182,6 @@ def test_higher_work_side_branch_reorgs_active_utxo_state(tmp_path: Path) -> Non
         timestamp_ms=4,
         nonce=28,
     )
-    side_child_anchor = _anchor(
-        side_child_fruit.block_hash(),
-        parent_anchor=side_anchor.block_hash(),
-        timestamp_ms=5,
-    )
 
     assert node.process_anchor(genesis)
     assert node.process_fruit(old_fruit)
@@ -1118,6 +1191,12 @@ def test_higher_work_side_branch_reorgs_active_utxo_state(tmp_path: Path) -> Non
     assert node.process_fruit(side_fruit)
     assert node.process_anchor(side_anchor)
     assert node.process_fruit(side_child_fruit)
+    side_child_anchor = _canonical_anchor(
+        node,
+        (side_child_fruit.block_hash(),),
+        parent_anchor=side_anchor.block_hash(),
+        timestamp_ms=5,
+    )
     assert node.process_anchor(side_child_anchor)
 
     assert node._anchor_height() == 2
@@ -1343,6 +1422,7 @@ def _anchor(
     fee_floor_matoms_per_kb: int = 0,
     anchor_reward_outputs: tuple[Output, ...] = (),
     timestamp_ms: int = 2,
+    utxo_state_root: bytes = EMPTY_UTXO_ROOT,
 ) -> Anchor:
     return _anchor_many(
         (covered_fruit_hash,),
@@ -1351,6 +1431,7 @@ def _anchor(
         fee_floor_matoms_per_kb=fee_floor_matoms_per_kb,
         anchor_reward_outputs=anchor_reward_outputs,
         timestamp_ms=timestamp_ms,
+        utxo_state_root=utxo_state_root,
     )
 
 
@@ -1362,6 +1443,7 @@ def _anchor_many(
     fee_floor_matoms_per_kb: int = 0,
     anchor_reward_outputs: tuple[Output, ...] = (),
     timestamp_ms: int = 2,
+    utxo_state_root: bytes = EMPTY_UTXO_ROOT,
 ) -> Anchor:
     tree = ShardTree()
     fee_entries = (FeeFloorEntry(ROOT_SHARD_ID, fee_floor_matoms_per_kb),)
@@ -1376,6 +1458,7 @@ def _anchor_many(
         anchor_reward_root=anchor_reward_root(anchor_reward_outputs),
         timestamp_ms=timestamp_ms,
         nonce=3,
+        utxo_state_root=utxo_state_root,
     )
     return Anchor(
         header=header,
@@ -1406,6 +1489,7 @@ def _canonical_anchor(
         anchor_reward_root=anchor_reward_root(anchor_reward_outputs),
         timestamp_ms=timestamp_ms,
         nonce=3,
+        utxo_state_root=template.utxo_state_root,
     )
     return Anchor(
         header=header,

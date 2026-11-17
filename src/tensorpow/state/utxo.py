@@ -605,3 +605,6 @@ __all__ = [
     "UTXOProof",
     "UTXOSet",
 ]
+
+
+EMPTY_UTXO_ROOT: Final[bytes] = UTXOSet().merkle_root()

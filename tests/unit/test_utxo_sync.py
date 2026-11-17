@@ -108,9 +108,13 @@ class _Peer:
 def test_build_request_and_apply_utxo_diff_round_trip() -> None:
     local_set = _set((1, 2, 3, 4))
     target_set = _set((2, 3, 4, 5, 6))
-    diff = request_utxo_diff(local_set.merkle_root(), _Peer(local_set, target_set))
+    diff = request_utxo_diff(
+        local_set.merkle_root(),
+        _Peer(local_set, target_set),
+        trusted_target_root=target_set.merkle_root(),
+    )
 
-    reconciled = apply_utxo_diff(local_set, diff)
+    reconciled = _apply_claimed(local_set, diff)
 
     assert diff.startswith(UTXO_DIFF_MAGIC)
     assert reconciled.merkle_root() == target_set.merkle_root()
@@ -131,11 +135,13 @@ def test_apply_utxo_diff_rejects_base_and_target_root_mismatches() -> None:
     diff = build_utxo_diff(local_set, target_set)
 
     with pytest.raises(UTXOReconciliationError, match="base root"):
-        apply_utxo_diff(_set((10, 11)), diff)
+        _apply_claimed(_set((10, 11)), diff)
 
     forged_target = _replace_target_root(diff, bytes([7]) * HASH_LEN_BYTES)
     with pytest.raises(UTXOReconciliationError, match="target root"):
-        apply_utxo_diff(local_set, forged_target)
+        apply_utxo_diff(
+            local_set, forged_target, trusted_target_root=_claimed_target(forged_target)
+        )
 
 
 def test_malformed_truncated_and_checksum_failed_diffs_are_rejected() -> None:
@@ -143,23 +149,29 @@ def test_malformed_truncated_and_checksum_failed_diffs_are_rejected() -> None:
     diff = build_utxo_diff(local_set, _set((20, 21, 22)))
 
     with pytest.raises(UTXOReconciliationError, match="truncated"):
-        apply_utxo_diff(local_set, diff[: sync.UTXO_DIFF_FIXED_BYTES - 1])
+        apply_utxo_diff(
+            local_set,
+            diff[: sync.UTXO_DIFF_FIXED_BYTES - 1],
+            trusted_target_root=_claimed_target(diff[: sync.UTXO_DIFF_FIXED_BYTES - 1]),
+        )
 
     bad_checksum = bytearray(diff)
     bad_checksum[-1] ^= 0x01
     with pytest.raises(UTXOReconciliationError, match="checksum"):
-        apply_utxo_diff(local_set, bytes(bad_checksum))
+        apply_utxo_diff(
+            local_set, bytes(bad_checksum), trusted_target_root=_claimed_target(bytes(bad_checksum))
+        )
 
     payload = bytearray(diff[:-HASH_LEN_BYTES])
     payload[0] ^= 0x01
     bad_magic = bytes(payload) + sync._diff_checksum(bytes(payload))
     with pytest.raises(UTXOReconciliationError, match="magic"):
-        apply_utxo_diff(local_set, bad_magic)
+        _apply_claimed(local_set, bad_magic)
 
     payload = diff[:-HASH_LEN_BYTES] + b"\x00"
     trailing = payload + sync._diff_checksum(payload)
     with pytest.raises(UTXOReconciliationError, match="trailing"):
-        apply_utxo_diff(local_set, trailing)
+        _apply_claimed(local_set, trailing)
 
     bad_iblt = bytearray(diff)
     iblt_offset = sync.UTXO_DIFF_HEADER_BYTES
@@ -167,7 +179,9 @@ def test_malformed_truncated_and_checksum_failed_diffs_are_rejected() -> None:
     bad_iblt_payload = bytes(bad_iblt[:-HASH_LEN_BYTES])
     bad_iblt = bytearray(bad_iblt_payload + sync._diff_checksum(bad_iblt_payload))
     with pytest.raises(UTXOReconciliationError, match="IBLT"):
-        apply_utxo_diff(local_set, bytes(bad_iblt))
+        apply_utxo_diff(
+            local_set, bytes(bad_iblt), trusted_target_root=_claimed_target(bytes(bad_iblt))
+        )
 
 
 def test_malicious_diffs_are_detected_before_state_is_accepted() -> None:
@@ -181,7 +195,9 @@ def test_malicious_diffs_are_detected_before_state_is_accepted() -> None:
         removals=((_outpoint(99), bytes(HASH_LEN_BYTES)),),
     )
     with pytest.raises(UTXOReconciliationError, match="absent"):
-        apply_utxo_diff(local_set, remove_missing)
+        apply_utxo_diff(
+            local_set, remove_missing, trusted_target_root=_claimed_target(remove_missing)
+        )
 
     wrong_remove_hash = _encode_diff(
         base_root=local_set.merkle_root(),
@@ -189,7 +205,9 @@ def test_malicious_diffs_are_detected_before_state_is_accepted() -> None:
         removals=((existing.outpoint, bytes([1]) * HASH_LEN_BYTES),),
     )
     with pytest.raises(UTXOReconciliationError, match="value hash"):
-        apply_utxo_diff(local_set, wrong_remove_hash)
+        apply_utxo_diff(
+            local_set, wrong_remove_hash, trusted_target_root=_claimed_target(wrong_remove_hash)
+        )
 
     add_existing = _encode_diff(
         base_root=local_set.merkle_root(),
@@ -197,7 +215,7 @@ def test_malicious_diffs_are_detected_before_state_is_accepted() -> None:
         additions=(existing,),
     )
     with pytest.raises(UTXOReconciliationError, match="already present"):
-        apply_utxo_diff(local_set, add_existing)
+        _apply_claimed(local_set, add_existing)
 
     remove_and_add_same_outpoint = _encode_diff(
         base_root=local_set.merkle_root(),
@@ -206,7 +224,11 @@ def test_malicious_diffs_are_detected_before_state_is_accepted() -> None:
         additions=(existing,),
     )
     with pytest.raises(UTXOReconciliationError, match="same outpoint"):
-        apply_utxo_diff(local_set, remove_and_add_same_outpoint)
+        apply_utxo_diff(
+            local_set,
+            remove_and_add_same_outpoint,
+            trusted_target_root=_claimed_target(remove_and_add_same_outpoint),
+        )
 
 
 def test_duplicate_or_unsorted_diff_records_are_non_canonical() -> None:
@@ -219,7 +241,9 @@ def test_duplicate_or_unsorted_diff_records_are_non_canonical() -> None:
         additions=(added, added),
     )
     with pytest.raises(UTXOReconciliationError, match="additions"):
-        apply_utxo_diff(local_set, duplicate_add)
+        apply_utxo_diff(
+            local_set, duplicate_add, trusted_target_root=_claimed_target(duplicate_add)
+        )
 
     unsorted_adds = _encode_diff(
         base_root=local_set.merkle_root(),
@@ -227,7 +251,9 @@ def test_duplicate_or_unsorted_diff_records_are_non_canonical() -> None:
         additions=(_utxo(42), _utxo(41)),
     )
     with pytest.raises(UTXOReconciliationError, match="additions"):
-        apply_utxo_diff(local_set, unsorted_adds)
+        apply_utxo_diff(
+            local_set, unsorted_adds, trusted_target_root=_claimed_target(unsorted_adds)
+        )
 
 
 def test_request_utxo_diff_checks_returned_base_root() -> None:
@@ -241,12 +267,13 @@ def test_request_utxo_diff_checks_returned_base_root() -> None:
             return build_utxo_diff(UTXOSet(), target_set)
 
     with pytest.raises(UTXOReconciliationError, match="base root"):
-        request_utxo_diff(local_set.merkle_root(), BadPeer())
+        request_utxo_diff(local_set.merkle_root(), BadPeer(), trusted_target_root=bytes(32))
 
     with pytest.raises(UTXOReconciliationError, match="entry count"):
         request_utxo_diff(
             local_set.merkle_root(),
             _Peer(local_set, oversized_target_set),
+            trusted_target_root=oversized_target_set.merkle_root(),
             max_entries=1,
         )
 
@@ -313,7 +340,7 @@ def test_empty_node_diff_is_less_than_twice_full_download_for_medium_fixture() -
     diff = build_utxo_diff(UTXOSet(), target_set)
     full_download_size = sum(len(utxo.to_bytes()) for utxo in target_utxos)
 
-    assert apply_utxo_diff(UTXOSet(), diff).merkle_root() == target_set.merkle_root()
+    assert _apply_claimed(UTXOSet(), diff).merkle_root() == target_set.merkle_root()
     assert len(diff) == sync.UTXO_DIFF_FIXED_BYTES + sum(
         sync.UTXO_DIFF_ADD_ENTRY_OVERHEAD_BYTES + len(utxo.to_bytes()) for utxo in target_utxos
     ) + _iblt_size(len(target_utxos))
@@ -333,7 +360,7 @@ def test_change_key_collision_falls_back_to_full_snapshot(
 
     diff = build_utxo_diff(local_set, target_set)
     decoded = sync._decode_utxo_diff(diff)
-    reconciled = apply_utxo_diff(local_set, diff)
+    reconciled = _apply_claimed(local_set, diff)
 
     assert decoded.full_snapshot is True
     assert decoded.removals == ()
@@ -389,3 +416,39 @@ def _deadline() -> Iterator[None]:
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0.0)
         signal.signal(signal.SIGALRM, previous)
+
+
+def _apply_claimed(local_set: UTXOSet, diff: bytes) -> UTXOSet:
+    return apply_utxo_diff(local_set, diff, trusted_target_root=_claimed_target(diff))
+
+
+def _claimed_target(diff: bytes) -> bytes:
+    """The diff's own (untrusted) target root, for tests that exercise other checks."""
+
+    offset = len(UTXO_DIFF_MAGIC) + HASH_LEN_BYTES
+    claimed = diff[offset : offset + HASH_LEN_BYTES]
+    return claimed if len(claimed) == HASH_LEN_BYTES else bytes(HASH_LEN_BYTES)
+
+
+def test_self_consistent_malicious_diff_is_rejected_against_trusted_anchor_root() -> None:
+    """M-9: a peer cannot hand a syncing node an arbitrary but self-consistent UTXO set."""
+
+    local_set = _set((60, 61))
+    honest_target = _set((60, 62))
+    forged_target = _set((60, 99, 100))
+    forged_diff = build_utxo_diff(local_set, forged_target)
+
+    with pytest.raises(UTXOReconciliationError, match="trusted anchor root"):
+        apply_utxo_diff(local_set, forged_diff, trusted_target_root=honest_target.merkle_root())
+    with pytest.raises(UTXOReconciliationError, match="trusted anchor root"):
+        request_utxo_diff(
+            local_set.merkle_root(),
+            _Peer(local_set, forged_target),
+            trusted_target_root=honest_target.merkle_root(),
+        )
+    honest = apply_utxo_diff(
+        local_set,
+        build_utxo_diff(local_set, honest_target),
+        trusted_target_root=honest_target.merkle_root(),
+    )
+    assert honest.merkle_root() == honest_target.merkle_root()

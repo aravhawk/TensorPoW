@@ -17,6 +17,7 @@ from tensorpow.crypto.hash import (
 )
 from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
 from tensorpow.pow.kernel import POW_MATRIX_DIM
+from tensorpow.state.utxo import EMPTY_UTXO_ROOT
 
 FORMAT_EPOCH: Final[int] = 0
 U16_MAX: Final[int] = 0xFFFF
@@ -69,10 +70,12 @@ class AnchorPowHeader:
     anchor_reward_root: bytes
     timestamp_ms: int
     nonce: int
+    utxo_state_root: bytes = EMPTY_UTXO_ROOT
 
     def __post_init__(self) -> None:
         _require_u16("version", self.version)
         _require_hash("parent_anchor", self.parent_anchor)
+        _require_hash("utxo_state_root", self.utxo_state_root)
         _require_hash("fruit_set_root", self.fruit_set_root)
         _require_hash("parent_candidate_root", self.parent_candidate_root)
         _require_hash("shard_tree_state_root", self.shard_tree_state_root)
@@ -123,6 +126,7 @@ def anchor_pow_preimage(header: AnchorPowHeader) -> bytes:
             header.shard_tree_state_root,
             header.fee_floor_set_root,
             header.anchor_reward_root,
+            header.utxo_state_root,
             _u64(header.timestamp_ms),
             _u64(header.nonce),
         )

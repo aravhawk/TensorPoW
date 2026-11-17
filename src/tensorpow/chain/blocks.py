@@ -25,6 +25,7 @@ from tensorpow.crypto.hash import (
 )
 from tensorpow.mempool.shard_tree import ROOT_SHARD_ID, ShardTree
 from tensorpow.pow.challenge import U16_MAX, U32_MAX, U64_MAX
+from tensorpow.state.utxo import EMPTY_UTXO_ROOT
 from tensorpow.tx.transaction import Output, TxDecodeError
 
 MAX_FRUIT_PAYLOAD_BYTES: Final[int] = 8192
@@ -149,6 +150,8 @@ class Anchor:
                 raise ValueError("genesis anchor must not carry parent candidates")
             if self.anchor_reward_outputs:
                 raise ValueError("genesis anchor must not carry reward outputs")
+            if self.header.utxo_state_root != EMPTY_UTXO_ROOT:
+                raise ValueError("genesis anchor must commit the empty UTXO root")
             _validate_genesis_empty_state(self.shard_tree_bytes, self.fee_floor_entries)
         elif not self.covered_fruit_hashes:
             raise ValueError("non-genesis anchor must cover at least one fruit")

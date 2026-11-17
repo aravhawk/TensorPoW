@@ -21,6 +21,7 @@ from tensorpow.pow.challenge import (
     AnchorPowHeader,
     FruitPowHeader,
 )
+from tensorpow.state.utxo import EMPTY_UTXO_ROOT
 
 U16_BYTES: Final[int] = 2
 U32_BYTES: Final[int] = 4
@@ -152,10 +153,12 @@ class AnchorHeader:
     anchor_reward_root: bytes
     timestamp_ms: int
     nonce: int
+    utxo_state_root: bytes = EMPTY_UTXO_ROOT
 
     def __post_init__(self) -> None:
         _require_format_epoch(self.version)
         require_hash("parent_anchor", self.parent_anchor)
+        require_hash("utxo_state_root", self.utxo_state_root)
         require_hash("fruit_set_root", self.fruit_set_root)
         require_hash("parent_candidate_root", self.parent_candidate_root)
         require_hash("shard_tree_state_root", self.shard_tree_state_root)
@@ -174,6 +177,7 @@ class AnchorHeader:
                 self.shard_tree_state_root,
                 self.fee_floor_set_root,
                 self.anchor_reward_root,
+                self.utxo_state_root,
                 _u64(self.timestamp_ms),
                 _u64(self.nonce),
             )
@@ -189,12 +193,14 @@ class AnchorHeader:
         shard_tree_state_root = reader.bytes(HASH_LEN_BYTES)
         fee_floor_set_root = reader.bytes(HASH_LEN_BYTES)
         anchor_reward_root = reader.bytes(HASH_LEN_BYTES)
+        utxo_state_root = reader.bytes(HASH_LEN_BYTES)
         timestamp_ms = reader.u64()
         nonce = reader.u64()
         reader.finish()
         try:
             return cls(
                 version=version,
+                utxo_state_root=utxo_state_root,
                 parent_anchor=parent_anchor,
                 fruit_set_root=fruit_set_root,
                 parent_candidate_root=parent_candidate_root,
@@ -221,6 +227,7 @@ class AnchorHeader:
             anchor_reward_root=self.anchor_reward_root,
             timestamp_ms=self.timestamp_ms,
             nonce=self.nonce,
+            utxo_state_root=self.utxo_state_root,
         )
 
 

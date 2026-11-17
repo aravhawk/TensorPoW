@@ -137,12 +137,18 @@ def request_utxo_diff(
     local_root: bytes,
     peer: UTXODiffPeer,
     *,
+    trusted_target_root: bytes,
     max_entries: int = MAX_UTXO_DIFF_ENTRIES,
     max_bytes: int = MAX_UTXO_DIFF_BYTES,
 ) -> bytes:
-    """Request and preflight-check a peer diff for the caller's current UTXO root."""
+    """Request and preflight-check a peer diff for the caller's current UTXO root.
+
+    ``trusted_target_root`` MUST come from a PoW-verified anchor header on the best
+    chain (``AnchorHeader.utxo_state_root``), never from the peer or the diff.
+    """
 
     _require_hash("local_root", local_root)
+    _require_hash("trusted_target_root", trusted_target_root)
     _require_diff_limits(max_entries=max_entries, max_bytes=max_bytes)
     if not isinstance(peer, UTXODiffPeer):
         raise TypeError("peer must implement build_utxo_diff(local_root)")
@@ -151,6 +157,8 @@ def request_utxo_diff(
     decoded = _decode_utxo_diff(diff, max_entries=max_entries, max_bytes=max_bytes)
     if decoded.base_root != local_root:
         raise UTXOReconciliationError("peer diff base root does not match requested root")
+    if decoded.target_root != trusted_target_root:
+        raise UTXOReconciliationError("peer diff target root is not the trusted anchor root")
     return diff
 
 
@@ -158,14 +166,23 @@ def apply_utxo_diff(
     local_set: UTXOSet,
     diff: bytes,
     *,
+    trusted_target_root: bytes,
     max_entries: int = MAX_UTXO_DIFF_ENTRIES,
     max_bytes: int = MAX_UTXO_DIFF_BYTES,
 ) -> UTXOSet:
-    """Apply a canonical UTXO reconciliation diff and validate the resulting root."""
+    """Apply a canonical UTXO reconciliation diff and validate the resulting root.
+
+    The result must equal ``trusted_target_root``, which the caller MUST take from a
+    PoW-verified anchor header (``AnchorHeader.utxo_state_root``). The diff's own
+    ``target_root`` is attacker-controlled and is only used as a consistency check.
+    """
 
     _require_utxo_set("local_set", local_set)
+    _require_hash("trusted_target_root", trusted_target_root)
     _require_diff_limits(max_entries=max_entries, max_bytes=max_bytes)
     decoded = _decode_utxo_diff(diff, max_entries=max_entries, max_bytes=max_bytes)
+    if decoded.target_root != trusted_target_root:
+        raise UTXOReconciliationError("diff target root is not the trusted anchor root")
 
     if local_set.merkle_root() != decoded.base_root:
         raise UTXOReconciliationError("diff base root does not match local UTXO root")

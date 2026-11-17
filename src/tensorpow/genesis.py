@@ -219,6 +219,7 @@ def build_genesis_anchor(
         shard_tree_state_root=shard_tree.state_root(),
         fee_floor_set_root=fee_floor_set_root(fee_entries),
         anchor_reward_root=anchor_reward_root(()),
+        utxo_state_root=inputs.empty_utxo_root,
         timestamp_ms=_require_nonnegative_int("timestamp_ms", timestamp_ms),
         nonce=_require_nonnegative_int("nonce", nonce),
     )
