@@ -21,7 +21,6 @@ from blake3 import blake3
 
 from tensorpow.chain.blocks import (
     Anchor,
-    FeeFloorEntry,
     Fruit,
     anchor_reward_root,
     fee_floor_set_root,
@@ -31,11 +30,11 @@ from tensorpow.chain.blocks import (
 )
 from tensorpow.chain.headers import AnchorHeader, FruitHeader
 from tensorpow.consensus.anchor_daa import ANCHOR_INTERVAL_MS
-from tensorpow.crypto.hash import HASH_LEN_BYTES, hash_bytes
+from tensorpow.crypto.hash import DOMAIN_SHARD_TREE, HASH_LEN_BYTES, domain_hash, hash_bytes
 from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
 from tensorpow.genesis import GENESIS_CHAIN_ID_TESTNET, GenesisInputs, build_genesis_artifact
-from tensorpow.mempool import ROOT_SHARD_ID, ShardTree
-from tensorpow.node import NodeResult, TensorPowConfig, TensorPowNode
+from tensorpow.mempool import ROOT_SHARD_ID
+from tensorpow.node import AnchorTemplate, NodeResult, TensorPowConfig, TensorPowNode
 from tensorpow.pow.challenge import FORMAT_EPOCH, GENESIS_PARENT_HASH
 from tensorpow.pow.kernel import Backend, resolve_backend
 from tensorpow.pow.verify import pow_digest_for_header
@@ -661,12 +660,9 @@ def _run_node_workload(
 
         if (steps + 1) % config.anchor_interval == 0:
             anchor = _anchor(
-                covered_fruit_hashes=tuple(sorted(pending_fruit_hashes)),
-                parent_candidate_hashes=(last_fruit_hash,),
-                parent_anchor=last_anchor_hash,
+                template=node.anchor_template(last_anchor_hash, pending_fruit_hashes),
                 step=steps,
                 anchor_interval=config.anchor_interval,
-                fee_floor_matoms_per_kb=1 + steps,
             )
             _require_accepted("anchor", node.process_anchor(anchor))
             last_anchor_hash = anchor.block_hash()
@@ -811,32 +807,27 @@ def _fruit(
 
 def _anchor(
     *,
-    covered_fruit_hashes: tuple[bytes, ...],
-    parent_candidate_hashes: tuple[bytes, ...],
-    parent_anchor: bytes,
+    template: AnchorTemplate,
     step: int,
     anchor_interval: int,
-    fee_floor_matoms_per_kb: int,
 ) -> Anchor:
-    tree = ShardTree()
-    fee_entries = (FeeFloorEntry(ROOT_SHARD_ID, fee_floor_matoms_per_kb),)
     header = AnchorHeader(
         version=FORMAT_EPOCH,
-        parent_anchor=parent_anchor,
-        fruit_set_root=fruit_set_root(covered_fruit_hashes),
-        parent_candidate_root=parent_candidate_root(parent_candidate_hashes),
-        shard_tree_state_root=tree.state_root(),
-        fee_floor_set_root=fee_floor_set_root(fee_entries),
+        parent_anchor=template.parent_anchor,
+        fruit_set_root=fruit_set_root(template.covered_fruit_hashes),
+        parent_candidate_root=parent_candidate_root(template.parent_candidate_hashes),
+        shard_tree_state_root=domain_hash(DOMAIN_SHARD_TREE, template.shard_tree_bytes),
+        fee_floor_set_root=fee_floor_set_root(template.fee_floor_entries),
         anchor_reward_root=anchor_reward_root(()),
         timestamp_ms=_anchor_timestamp_ms(step, anchor_interval),
         nonce=step,
     )
     return Anchor(
         header=header,
-        covered_fruit_hashes=covered_fruit_hashes,
-        parent_candidate_hashes=parent_candidate_hashes,
-        shard_tree_bytes=tree.serialize(),
-        fee_floor_entries=fee_entries,
+        covered_fruit_hashes=template.covered_fruit_hashes,
+        parent_candidate_hashes=template.parent_candidate_hashes,
+        shard_tree_bytes=template.shard_tree_bytes,
+        fee_floor_entries=template.fee_floor_entries,
     )
 
 

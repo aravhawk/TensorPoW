@@ -88,6 +88,7 @@ def test_dag_order_allows_only_one_conflicting_spend(tmp_path: Path) -> None:
             left_fruit,
             right_fruit,
             parent_anchor=funding_anchor.block_hash(),
+            node=node,
         )
         anchored = node.process_anchor(anchor)
 
@@ -112,6 +113,7 @@ def _anchor_for_fruits(
     *fruits: Fruit,
     parent_anchor: bytes,
     anchor_reward_outputs: tuple[Output, ...] = (),
+    node: TensorPowNode | None = None,
 ) -> Anchor:
     if not fruits:
         raise ValueError("at least one fruit is required")
@@ -119,6 +121,11 @@ def _anchor_for_fruits(
     fee_entries = (FeeFloorEntry(ROOT_SHARD_ID, 0),)
     covered = tuple(sorted(fruit_.block_hash() for fruit_ in fruits))
     parent_candidates = covered
+    if node is not None:
+        template = node.anchor_template(parent_anchor, covered)
+        tree = ShardTree.deserialize(template.shard_tree_bytes)
+        fee_entries = template.fee_floor_entries
+        parent_candidates = template.parent_candidate_hashes
     header = AnchorHeader(
         version=FORMAT_EPOCH,
         parent_anchor=parent_anchor,

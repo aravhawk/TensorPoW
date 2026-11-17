@@ -717,15 +717,36 @@ Shard utilization for a leaf over a window is:
 payload_bytes_confirmed / (MAX_FRUIT_PAYLOAD_BYTES * fruit_slots_observed)
 ```
 
-Split rule: a leaf SHOULD split when utilization is at least
+Split rule: a leaf MUST split when utilization is at least
 `SHARD_SPLIT_THRESHOLD_PCT` for `SHARD_SPLIT_WINDOW_ANCHORS` consecutive anchors.
 A split is invalid if it would exceed `SHARD_MAX_DEPTH`.
 
-Merge rule: sibling leaves SHOULD merge when both siblings stay at or below
+Merge rule: sibling leaves MUST merge when both siblings stay at or below
 `SHARD_MERGE_THRESHOLD_PCT` for `SHARD_MERGE_WINDOW_ANCHORS`. Concurrent
-split/merge operations for different parents may be committed in one anchor.
-Conflicting operations for the same parent are ordered by anchor order; later
-conflicts are queued.
+split/merge operations for different parents are committed in one anchor.
+
+Shard-tree and fee-floor commitments are consensus-checked, not miner-chosen.
+For every non-genesis anchor, validators MUST recompute the committed
+`shard_tree_bytes` and `fee_floor_entries` from the parent branch state and the
+anchor's covered fruits, and MUST reject the anchor unless both match exactly:
+
+1. Walk covered fruits in canonical covered order (section 5). Each fruit whose
+   `shard_id` is a leaf of the parent tree appends one fee-floor sample
+   `(fees, payload_bytes)` to that leaf's window, where `fees` is the sum of
+   `inputs - outputs` over the fruit's applied non-coinbase transactions and
+   `payload_bytes` is the fruit's serialized non-header payload size.
+2. Every parent leaf records one utilization sample for the anchor:
+   `payload_bytes_confirmed` is the sum over its covered fruits and
+   `fruit_slots_observed` is `max(1, covered_fruit_count_in_leaf)`.
+3. Apply every split and merge whose rule above holds over the leaf's most recent
+   samples, splits in ascending shard id. Splits that would make the serialized
+   tree exceed `SHARD_TREE_MAX_BYTES` are dropped from the highest shard id down.
+4. Every leaf of the resulting tree commits the next floor (section 12). Split
+   children inherit the parent's previous floor and fee window. A merged parent
+   takes the larger child floor and both child windows in confirmation order.
+   New leaves start with empty utilization history.
+
+The genesis anchor commits the root tree and a zero root floor.
 
 Shard-tree commitments use:
 
@@ -769,7 +790,10 @@ next_floor = floor((FEE_FLOOR_EWMA_PREV_WEIGHT * previous_floor
 ```
 
 The window is the shard's last `FEE_FLOOR_WINDOW_FRUITS` confirmed fruits. Empty
-windows use `recent_rate = FEE_FLOOR_MIN_MATOMS_PER_KB`.
+windows use `recent_rate = FEE_FLOOR_MIN_MATOMS_PER_KB`. `previous_floor` is the
+floor committed by the parent anchor. Each anchor commits `next_floor` for every
+leaf, and validators recompute it as described in section 11. An anchor whose
+committed floor differs from the recomputed value is invalid.
 
 At confirmation:
 

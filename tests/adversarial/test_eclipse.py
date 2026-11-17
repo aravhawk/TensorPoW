@@ -34,7 +34,6 @@ def test_eclipse_packets_are_rejected_and_honest_sync_restores_state(tmp_path: P
         honest_anchor = anchor(
             covered_fruit_hashes=(honest_fruit.block_hash(),),
             parent_anchor=genesis.block_hash(),
-            fee_floor_matoms_per_kb=7,
             timestamp_ms=3,
             nonce=22,
         )

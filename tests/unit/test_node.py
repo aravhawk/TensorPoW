@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import tensorpow.consensus.rewards as rewards_module
+import tensorpow.consensus.shard_policy as shard_policy_module
 import tensorpow.node.node as node_module
 from tensorpow.chain.blocks import (
     Anchor,
@@ -31,7 +32,7 @@ from tensorpow.consensus.rewards import (
 from tensorpow.crypto.hash import HASH_LEN_BYTES, hash_bytes
 from tensorpow.crypto.signatures import SIG_TYPE_ED25519_BIT
 from tensorpow.genesis import GENESIS_CHAIN_ID_TESTNET, GenesisInputs, build_genesis_artifact
-from tensorpow.mempool import ROOT_SHARD_ID, ShardTree
+from tensorpow.mempool import ROOT_SHARD_ID, ShardTree, child_shard_ids
 from tensorpow.node import TensorPowConfig, TensorPowNode, write_default_config
 from tensorpow.pow.challenge import FORMAT_EPOCH, GENESIS_PARENT_HASH, pow_preimage
 from tensorpow.pow.kernel import FRUIT_TARGET_LE
@@ -105,7 +106,7 @@ def test_process_anchor_updates_shard_tree_fee_floor_and_syncs_peer(tmp_path: Pa
     assert second.get_block(fruit.block_hash()) == fruit.serialize()
     assert second.get_block(anchor.block_hash()) == anchor.serialize()
     assert second.shard_tree == ShardTree()
-    assert second.store.fee_floor(ROOT_SHARD_ID) == 5
+    assert second.store.fee_floor(ROOT_SHARD_ID) == 0
     assert second.status()["blocks"] == 3
     first.close()
     second.close()
@@ -359,7 +360,11 @@ def test_pow_verifier_rejection_blocks_fruit_and_anchor(tmp_path: Path) -> None:
         accepting.close()
 
 
-def test_anchored_fee_floor_is_enforced_for_raw_transactions(tmp_path: Path) -> None:
+def test_anchored_fee_floor_is_enforced_for_raw_transactions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shard_policy_module, "next_fee_floor", lambda _previous, _window: 100_000)
     node = _node(tmp_path / "node")
     wallet = Wallet.recover("11" * 32)
     recipient = Wallet.recover("22" * 32)
@@ -394,6 +399,118 @@ def test_anchored_fee_floor_is_enforced_for_raw_transactions(tmp_path: Path) -> 
     assert mempool_result is not None
     assert mempool_result.reason == "below_fee_floor"
     node.close()
+
+
+def test_anchor_cannot_commit_arbitrary_fee_floor(tmp_path: Path) -> None:
+    """M-2 / repro R4: a u64::MAX floor would halt every transaction."""
+
+    node = _node(tmp_path / "node")
+    genesis = _genesis_anchor()
+    fruit = _fruit((_coinbase_tx(70).to_bytes(),), latest_anchor=genesis.block_hash())
+    halting = _anchor(
+        fruit.block_hash(),
+        parent_anchor=genesis.block_hash(),
+        fee_floor_matoms_per_kb=0xFFFFFFFFFFFFFFFF,
+    )
+    try:
+        assert node.process_anchor(genesis)
+        assert node.process_fruit(fruit)
+        assert node.process_anchor(halting).reason == "bad_fee_floor_entries"
+        assert node.store.fee_floor(ROOT_SHARD_ID) == 0
+
+        canonical = _canonical_anchor(
+            node, (fruit.block_hash(),), parent_anchor=genesis.block_hash()
+        )
+        assert node.process_anchor(canonical).accepted
+        assert node.store.fee_floor(ROOT_SHARD_ID) == 0
+    finally:
+        node.close()
+
+
+def test_anchor_cannot_zero_a_fee_floor_earned_by_confirmed_fees(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rewards_module, "COINBASE_MATURITY_ANCHORS", 1)
+    node = _node(tmp_path / "node")
+    payer = Wallet.recover("71" * 32)
+    payee = Wallet.recover("72" * 32)
+    genesis = _genesis_anchor()
+    coinbase = Transaction.coinbase((Output(50_000, TEMPLATE_PKH, payload=payer.pubkey_hash()),))
+    try:
+        assert node.process_anchor(genesis)
+        funding = _fruit((coinbase.to_bytes(),), latest_anchor=genesis.block_hash(), nonce=71)
+        assert node.process_fruit(funding)
+        funding_anchor = _anchor(funding.block_hash(), parent_anchor=genesis.block_hash())
+        assert node.process_anchor(funding_anchor)
+        (funded,) = node.utxo_set.by_owner(payer.pubkey_hash())
+        spend = payer.create_signed_transaction(
+            utxos=(funded,),
+            recipient_address=payee.address,
+            amount_matoms=10_000,
+            fee_matoms=20_000,
+            current_height=funded.lockheight,
+        )
+        paying = _fruit(
+            (_coinbase_tx(73).to_bytes(), spend.to_bytes()),
+            latest_anchor=funding_anchor.block_hash(),
+            parent_selected=funding.block_hash(),
+            timestamp_ms=3,
+            nonce=73,
+        )
+        assert node.process_fruit(paying).accepted
+        template = node.anchor_template(funding_anchor.block_hash(), (paying.block_hash(),))
+        (earned,) = template.fee_floor_entries
+        assert earned.floor_matoms_per_kb > 0
+
+        zeroed = _anchor(
+            paying.block_hash(),
+            parent_anchor=funding_anchor.block_hash(),
+            fee_floor_matoms_per_kb=0,
+            timestamp_ms=4,
+        )
+        assert node.process_anchor(zeroed).reason == "bad_fee_floor_entries"
+        canonical = _canonical_anchor(
+            node, (paying.block_hash(),), parent_anchor=funding_anchor.block_hash(), timestamp_ms=4
+        )
+        assert node.process_anchor(canonical).accepted
+        assert node.store.fee_floor(ROOT_SHARD_ID) == earned.floor_matoms_per_kb
+    finally:
+        node.close()
+
+
+def test_anchor_cannot_reshape_shard_tree_without_sustained_load(tmp_path: Path) -> None:
+    node = _node(tmp_path / "node")
+    genesis = _genesis_anchor()
+    fruit = _fruit((_coinbase_tx(74).to_bytes(),), latest_anchor=genesis.block_hash())
+    split_tree = ShardTree(child_shard_ids(ROOT_SHARD_ID))
+    fee_entries = tuple(FeeFloorEntry(shard_id, 0) for shard_id in split_tree.leaf_shard_ids)
+    covered = (fruit.block_hash(),)
+    header = AnchorHeader(
+        version=FORMAT_EPOCH,
+        parent_anchor=genesis.block_hash(),
+        fruit_set_root=fruit_set_root(covered),
+        parent_candidate_root=parent_candidate_root(covered),
+        shard_tree_state_root=split_tree.state_root(),
+        fee_floor_set_root=fee_floor_set_root(fee_entries),
+        anchor_reward_root=anchor_reward_root(()),
+        timestamp_ms=2,
+        nonce=3,
+    )
+    reshaping = Anchor(
+        header=header,
+        covered_fruit_hashes=covered,
+        parent_candidate_hashes=covered,
+        shard_tree_bytes=split_tree.serialize(),
+        fee_floor_entries=fee_entries,
+    )
+    try:
+        assert node.process_anchor(genesis)
+        assert node.process_fruit(fruit)
+        assert node.process_anchor(reshaping).reason == "bad_shard_tree"
+        assert node.shard_tree == ShardTree()
+    finally:
+        node.close()
 
 
 def test_anchor_reward_outputs_are_committed_and_claimed(tmp_path: Path) -> None:
@@ -509,8 +626,8 @@ def test_spend_of_coinbase_cannot_be_replayed_after_identical_coinbase(
             nonce=61,
         )
         assert node.process_fruit(spending).accepted
-        spending_anchor = _anchor(
-            spending.block_hash(), parent_anchor=first_anchor.block_hash(), timestamp_ms=4
+        spending_anchor = _canonical_anchor(
+            node, (spending.block_hash(),), parent_anchor=first_anchor.block_hash(), timestamp_ms=4
         )
         assert node.process_anchor(spending_anchor).accepted
         assert len(node.utxo_set.by_owner(victim.pubkey_hash())) == 1
@@ -523,8 +640,11 @@ def test_spend_of_coinbase_cannot_be_replayed_after_identical_coinbase(
             nonce=62,
         )
         assert node.process_fruit(recreated).accepted
-        recreated_anchor = _anchor(
-            recreated.block_hash(), parent_anchor=spending_anchor.block_hash(), timestamp_ms=6
+        recreated_anchor = _canonical_anchor(
+            node,
+            (recreated.block_hash(),),
+            parent_anchor=spending_anchor.block_hash(),
+            timestamp_ms=6,
         )
         assert node.process_anchor(recreated_anchor).accepted
 
@@ -610,12 +730,13 @@ def test_coinbase_matures_at_covering_anchor_height(
         timestamp_ms=3_000,
         nonce=102,
     )
-    filler_anchor = _anchor(
-        filler_fruit.block_hash(),
+    assert node.process_fruit(filler_fruit).accepted
+    filler_anchor = _canonical_anchor(
+        node,
+        (filler_fruit.block_hash(),),
         parent_anchor=parent_anchor,
         timestamp_ms=3_500,
     )
-    assert node.process_fruit(filler_fruit).accepted
     assert node.process_anchor(filler_anchor).accepted
     parent_anchor = filler_anchor.block_hash()
     parent_fruit = filler_fruit.block_hash()
@@ -627,12 +748,13 @@ def test_coinbase_matures_at_covering_anchor_height(
         timestamp_ms=4_000,
         nonce=103,
     )
-    boundary_anchor = _anchor(
-        boundary_fruit.block_hash(),
+    assert node.process_fruit(boundary_fruit).accepted
+    boundary_anchor = _canonical_anchor(
+        node,
+        (boundary_fruit.block_hash(),),
         parent_anchor=parent_anchor,
         timestamp_ms=4_500,
     )
-    assert node.process_fruit(boundary_fruit).accepted
     assert node.process_anchor(boundary_anchor).accepted
     assert node.utxo_set.get(coinbase_outpoint) is None
     node.close()
@@ -1213,7 +1335,7 @@ def _anchor(
     covered_fruit_hash: bytes,
     *,
     parent_anchor: bytes,
-    fee_floor_matoms_per_kb: int = 5,
+    fee_floor_matoms_per_kb: int = 0,
     anchor_reward_outputs: tuple[Output, ...] = (),
     timestamp_ms: int = 2,
 ) -> Anchor:
@@ -1232,7 +1354,7 @@ def _anchor_many(
     *,
     parent_anchor: bytes,
     parent_candidate_hashes: tuple[bytes, ...],
-    fee_floor_matoms_per_kb: int = 5,
+    fee_floor_matoms_per_kb: int = 0,
     anchor_reward_outputs: tuple[Output, ...] = (),
     timestamp_ms: int = 2,
 ) -> Anchor:
@@ -1256,6 +1378,36 @@ def _anchor_many(
         parent_candidate_hashes=parent_candidate_hashes,
         shard_tree_bytes=tree.serialize(),
         fee_floor_entries=fee_entries,
+        anchor_reward_outputs=anchor_reward_outputs,
+    )
+
+
+def _canonical_anchor(
+    node: TensorPowNode,
+    covered_fruit_hashes: tuple[bytes, ...],
+    *,
+    parent_anchor: bytes,
+    anchor_reward_outputs: tuple[Output, ...] = (),
+    timestamp_ms: int = 2,
+) -> Anchor:
+    template = node.anchor_template(parent_anchor, covered_fruit_hashes)
+    header = AnchorHeader(
+        version=FORMAT_EPOCH,
+        parent_anchor=parent_anchor,
+        fruit_set_root=fruit_set_root(template.covered_fruit_hashes),
+        parent_candidate_root=parent_candidate_root(template.parent_candidate_hashes),
+        shard_tree_state_root=ShardTree.deserialize(template.shard_tree_bytes).state_root(),
+        fee_floor_set_root=fee_floor_set_root(template.fee_floor_entries),
+        anchor_reward_root=anchor_reward_root(anchor_reward_outputs),
+        timestamp_ms=timestamp_ms,
+        nonce=3,
+    )
+    return Anchor(
+        header=header,
+        covered_fruit_hashes=template.covered_fruit_hashes,
+        parent_candidate_hashes=template.parent_candidate_hashes,
+        shard_tree_bytes=template.shard_tree_bytes,
+        fee_floor_entries=template.fee_floor_entries,
         anchor_reward_outputs=anchor_reward_outputs,
     )
 

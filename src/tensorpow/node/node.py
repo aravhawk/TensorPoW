@@ -17,6 +17,7 @@ from tensorpow.chain.blocks import (
     BlockDecodeError,
     FeeFloorEntry,
     Fruit,
+    fruit_payload_size_bytes,
 )
 from tensorpow.chain.headers import HeaderDecodeError
 from tensorpow.consensus.anchor_daa import (
@@ -40,6 +41,11 @@ from tensorpow.consensus.rewards import (
     fruit_subsidy_assignments,
     interval_subsidy_matoms,
     reward_pools,
+)
+from tensorpow.consensus.shard_policy import (
+    CoveredFruitStats,
+    ShardPolicyState,
+    next_shard_policy_state,
 )
 from tensorpow.crypto.hash import HASH_LEN_BYTES
 from tensorpow.genesis import GENESIS_CHAIN_ID_MAINNET, GENESIS_CHAIN_ID_TESTNET
@@ -114,14 +120,38 @@ class _AnchorMeta:
 @dataclass(slots=True)
 class _AnchorBranchState:
     height: int
-    shard_tree: ShardTree
-    fee_floors: dict[int, int]
+    policy: ShardPolicyState
     utxo_set: UTXOSet
     minted_supply: int
     claimed_fruits: dict[bytes, int]
     confirmed_tx_ids: set[bytes]
     covered_closure: set[bytes]
     frontier: set[bytes]
+
+    @property
+    def shard_tree(self) -> ShardTree:
+        return self.policy.tree
+
+    @property
+    def fee_floors(self) -> dict[int, int]:
+        return self.policy.fee_floors
+
+
+@dataclass(frozen=True, slots=True)
+class _CoveredApplyResult:
+    error: str | None
+    effective_tips: dict[bytes, int]
+    confirmed_tx_ids: tuple[bytes, ...]
+    stats: tuple[CoveredFruitStats, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _AnchorTransition:
+    error: str | None
+    candidate_update: _ParentCandidateUpdate | None = None
+    staged: UTXOSet | None = None
+    applied: _CoveredApplyResult | None = None
+    policy: ShardPolicyState | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,7 +437,7 @@ class TensorPowNode:
             validation_view = UTXOSet(self.utxo_set.utxos())
             tip_sum = 0
             for tx in txs[1:]:
-                result, tip_matoms = _apply_spend_tx(
+                result, tip_matoms, _fee_matoms = _apply_spend_tx(
                     validation_view,
                     tx,
                     shard_tree=self.shard_tree,
@@ -804,40 +834,41 @@ class TensorPowNode:
         anchor_target: bytes,
         state: _AnchorBranchState,
     ) -> str | None:
-        try:
-            next_tree = ShardTree.deserialize(anchor.shard_tree_bytes)
-        except (TypeError, ValueError):
-            return "bad_shard_tree"
-        if tuple(entry.shard_id for entry in anchor.fee_floor_entries) != tuple(
-            next_tree.leaf_shard_ids
-        ):
-            return "bad_fee_floor_entries"
+        if anchor.genesis_commitment != bytes(HASH_LEN_BYTES):
+            # Genesis contents are fixed by Anchor validation (root tree, zero floor).
+            state.height = anchor_height
+            state.policy = ShardPolicyState.genesis(
+                ShardTree.deserialize(anchor.shard_tree_bytes),
+                {entry.shard_id: entry.floor_matoms_per_kb for entry in anchor.fee_floor_entries},
+            )
+            return None
 
-        candidate_update = self._parent_candidate_update(state, anchor.covered_fruit_hashes)
-        if candidate_update is None:
-            return "bad_parent_candidate_order"
+        transition = self._derive_anchor_transition(
+            state,
+            anchor.covered_fruit_hashes,
+            anchor_height=anchor_height,
+        )
+        if transition.error is not None:
+            return transition.error
+        candidate_update = transition.candidate_update
+        staged = transition.staged
+        applied = transition.applied
+        policy = transition.policy
+        if candidate_update is None or staged is None or applied is None or policy is None:
+            return "bad_anchor_transition"
         if anchor.parent_candidate_hashes != candidate_update.candidates:
             return "bad_parent_candidate_order"
+        if anchor.shard_tree_bytes != policy.tree.serialize():
+            return "bad_shard_tree"
+        if anchor.fee_floor_entries != _fee_floor_entries(policy):
+            return "bad_fee_floor_entries"
 
-        staged = UTXOSet(state.utxo_set.utxos())
-        apply_result, _spent_outpoints, _created_utxos, effective_tips, confirmed_tx_ids = (
-            self._apply_anchor_fruits(
-                anchor,
-                staged=staged,
-                shard_tree=state.shard_tree,
-                fee_floors=state.fee_floors,
-                validation_anchor_height=anchor_height,
-                confirmed_tx_ids=state.confirmed_tx_ids,
-            )
-        )
-        if apply_result is not None:
-            return apply_result
         claim_result, reward_utxos, minted_increment, claimed_fruits = self._claim_anchor_rewards(
             anchor,
             anchor_hash=anchor_hash,
             anchor_height=anchor_height,
             anchor_target=anchor_target,
-            effective_tips=effective_tips,
+            effective_tips=applied.effective_tips,
             staged=staged,
             minted_supply=state.minted_supply,
             claimed_fruits=state.claimed_fruits,
@@ -848,18 +879,41 @@ class TensorPowNode:
             staged.add(utxo)
 
         state.height = anchor_height
-        state.shard_tree = next_tree
-        state.fee_floors = {
-            entry.shard_id: entry.floor_matoms_per_kb for entry in anchor.fee_floor_entries
-        }
+        state.policy = policy
         state.utxo_set = staged
         state.minted_supply += minted_increment
         for fruit_hash in claimed_fruits:
             state.claimed_fruits[fruit_hash] = anchor_height
-        state.confirmed_tx_ids.update(confirmed_tx_ids)
+        state.confirmed_tx_ids.update(applied.confirmed_tx_ids)
         state.covered_closure.update(candidate_update.closure_additions)
         state.frontier = set(candidate_update.frontier)
         return None
+
+    def _derive_anchor_transition(
+        self,
+        state: _AnchorBranchState,
+        covered_fruit_hashes: tuple[bytes, ...],
+        *,
+        anchor_height: int,
+    ) -> _AnchorTransition:
+        """Apply covered fruits to a staged copy of ``state`` and derive commitments."""
+
+        candidate_update = self._parent_candidate_update(state, covered_fruit_hashes)
+        if candidate_update is None:
+            return _AnchorTransition("bad_parent_candidate_order")
+        staged = UTXOSet(state.utxo_set.utxos())
+        applied = self._apply_anchor_fruits(
+            covered_fruit_hashes,
+            staged=staged,
+            shard_tree=state.shard_tree,
+            fee_floors=state.fee_floors,
+            validation_anchor_height=anchor_height,
+            confirmed_tx_ids=state.confirmed_tx_ids,
+        )
+        if applied.error is not None:
+            return _AnchorTransition(applied.error)
+        policy = next_shard_policy_state(state.policy, applied.stats)
+        return _AnchorTransition(None, candidate_update, staged, applied, policy)
 
     def _active_chain_batch(self, tip_hash: bytes, state: _AnchorBranchState) -> StorageBatch:
         utxo_by_key = {utxo.outpoint_key(): utxo.to_bytes() for utxo in state.utxo_set.utxos()}
@@ -977,34 +1031,33 @@ class TensorPowNode:
 
     def _apply_anchor_fruits(
         self,
-        anchor: Anchor,
+        covered_fruit_hashes: tuple[bytes, ...],
         *,
         staged: UTXOSet,
         shard_tree: ShardTree,
         fee_floors: Mapping[int, int],
         validation_anchor_height: int,
         confirmed_tx_ids: set[bytes],
-    ) -> tuple[
-        str | None, tuple[Outpoint, ...], tuple[UTXO, ...], dict[bytes, int], tuple[bytes, ...]
-    ]:
-        ordered_fruit_hashes = self._canonical_covered_fruit_order(anchor)
+    ) -> _CoveredApplyResult:
+        ordered_fruit_hashes = self._canonical_covered_fruit_order(covered_fruit_hashes)
         if ordered_fruit_hashes is None:
-            return "bad_covered_fruit_order", (), (), {}, ()
+            return _CoveredApplyResult("bad_covered_fruit_order", {}, (), ())
 
         spent_outpoints: set[Outpoint] = set()
-        created_utxos: list[UTXO] = []
         effective_tips: dict[bytes, int] = {}
         covered_tx_ids: set[bytes] = set()
         skipped_tx_ids: set[bytes] = set()
+        stats: list[CoveredFruitStats] = []
         for fruit_hash in ordered_fruit_hashes:
             fruit = self._load_fruit(fruit_hash)
             if fruit is None:
-                return "missing_covered_fruit", (), (), {}, ()
+                return _CoveredApplyResult("missing_covered_fruit", {}, (), ())
             fee_floor = fee_floors.get(fruit.header.shard_id, 0)
             try:
                 txs = tuple(Transaction.from_bytes(raw) for raw in fruit.transactions)
             except (TypeError, ValueError, TxDecodeError):
-                return "malformed_fruit_tx", (), (), {}, ()
+                return _CoveredApplyResult("malformed_fruit_tx", {}, (), ())
+            fruit_fees = 0
             for tx in txs[1:]:
                 tx_id = tx.tx_id()
                 if tx_id in confirmed_tx_ids or tx_id in covered_tx_ids:
@@ -1019,7 +1072,7 @@ class TensorPowNode:
                 ):
                     skipped_tx_ids.add(tx_id)
                     continue
-                result, tip_matoms = _apply_spend_tx(
+                result, tip_matoms, fee_matoms = _apply_spend_tx(
                     staged,
                     tx,
                     shard_tree=shard_tree,
@@ -1029,32 +1082,40 @@ class TensorPowNode:
                     current_height=validation_anchor_height,
                 )
                 if result is not None:
-                    return result, (), (), {}, ()
+                    return _CoveredApplyResult(result, {}, (), ())
                 for input_ in tx.inputs:
                     spent_outpoints.add(input_.previous_outpoint)
                 for output_index, _output in enumerate(tx.outputs):
                     try:
-                        utxo = _utxo_from_output(tx, output_index)
-                        staged.add(utxo)
+                        staged.add(_utxo_from_output(tx, output_index))
                     except (KeyError, ValueError):
-                        return "duplicate_tx_outpoint", (), (), {}, ()
-                    created_utxos.append(utxo)
+                        return _CoveredApplyResult("duplicate_tx_outpoint", {}, (), ())
                 effective_tips[fruit_hash] = effective_tips.get(fruit_hash, 0) + tip_matoms
+                fruit_fees += fee_matoms
+            stats.append(
+                CoveredFruitStats(
+                    shard_id=fruit.header.shard_id,
+                    payload_bytes=fruit_payload_size_bytes(fruit.transactions),
+                    fees_matoms=fruit_fees,
+                )
+            )
 
-        return (
+        return _CoveredApplyResult(
             None,
-            tuple(sorted(spent_outpoints, key=lambda outpoint: outpoint.to_bytes())),
-            tuple(created_utxos),
             effective_tips,
             tuple(sorted(covered_tx_ids)),
+            tuple(stats),
         )
 
-    def _canonical_covered_fruit_order(self, anchor: Anchor) -> tuple[bytes, ...] | None:
+    def _canonical_covered_fruit_order(
+        self,
+        covered_fruit_hashes: tuple[bytes, ...],
+    ) -> tuple[bytes, ...] | None:
         dag = self._fruit_dag()
         if dag is None:
             return None
         metadata = dag.ghostdag_metadata(self._ghostdag_k())
-        covered = set(anchor.covered_fruit_hashes)
+        covered = set(covered_fruit_hashes)
         if not covered.issubset(metadata):
             return None
         return tuple(
@@ -1133,19 +1194,24 @@ class TensorPowNode:
             state = self._rebuild_anchor_branch_state(parent_anchor)
             if parent_meta is None or state is None:
                 raise ValueError("parent_anchor is unknown or invalid")
-            update = self._parent_candidate_update(state, covered)
-            if update is None:
-                raise ValueError("covered fruits are unknown")
+            transition = self._derive_anchor_transition(
+                state,
+                covered,
+                anchor_height=parent_meta.height + 1,
+            )
+            if (
+                transition.error is not None
+                or transition.candidate_update is None
+                or transition.policy is None
+            ):
+                raise ValueError(f"covered fruits cannot be anchored: {transition.error}")
             return AnchorTemplate(
                 parent_anchor=parent_anchor,
                 height=parent_meta.height + 1,
                 covered_fruit_hashes=covered,
-                parent_candidate_hashes=update.candidates,
-                shard_tree_bytes=state.shard_tree.serialize(),
-                fee_floor_entries=tuple(
-                    FeeFloorEntry(shard_id, state.fee_floors.get(shard_id, 0))
-                    for shard_id in state.shard_tree.leaf_shard_ids
-                ),
+                parent_candidate_hashes=transition.candidate_update.candidates,
+                shard_tree_bytes=transition.policy.tree.serialize(),
+                fee_floor_entries=_fee_floor_entries(transition.policy),
             )
 
     def _fruit_dag(self) -> BlockDAG | None:
@@ -1521,9 +1587,9 @@ def _apply_spend_tx(
     fee_floor_matoms_per_kb: int,
     current_time_ms: int,
     current_height: int,
-) -> tuple[str | None, int]:
+) -> tuple[str | None, int, int]:
     if shard_tree.route_tx(tx.tx_id()) != required_shard_id:
-        return "wrong_shard", 0
+        return "wrong_shard", 0, 0
     try:
         check_locks(
             locktime_ms=tx.locktime_ms,
@@ -1532,17 +1598,17 @@ def _apply_spend_tx(
             current_height=current_height,
         )
     except (TypeError, ValueError, ScriptError):
-        return "tx_lock_unmatured", 0
+        return "tx_lock_unmatured", 0, 0
     seen: set[Outpoint] = set()
     input_sum = 0
     for input_index, input_ in enumerate(tx.inputs):
         outpoint = input_.previous_outpoint
         if outpoint in seen:
-            return "duplicate_input", 0
+            return "duplicate_input", 0, 0
         seen.add(outpoint)
         utxo = utxo_set.get(outpoint)
         if utxo is None:
-            return "missing_input", 0
+            return "missing_input", 0, 0
         if not verify_utxo_spend(
             utxo,
             input_.witness,
@@ -1551,20 +1617,20 @@ def _apply_spend_tx(
             current_time_ms=current_time_ms,
             current_height=current_height,
         ):
-            return "script_failed", 0
+            return "script_failed", 0, 0
         input_sum += utxo.amount_matoms
     output_sum = sum(output.amount_matoms for output in tx.outputs)
     if output_sum > input_sum:
-        return "negative_fee", 0
+        return "negative_fee", 0, 0
     fee_matoms = input_sum - output_sum
     tx_size_bytes = len(tx.to_bytes())
     if fee_matoms * BYTES_PER_KB // tx_size_bytes < fee_floor_matoms_per_kb:
-        return "below_fee_floor", 0
+        return "below_fee_floor", 0, 0
     burned = burned_fee_matoms(fee_floor_matoms_per_kb, tx_size_bytes)
     tip_matoms = max(0, fee_matoms - burned)
     for input_ in tx.inputs:
         utxo_set.remove(input_.previous_outpoint)
-    return None, tip_matoms
+    return None, tip_matoms, fee_matoms
 
 
 def _utxo_from_output(
@@ -1698,11 +1764,14 @@ def _decode_anchor_meta(value: bytes | None) -> _AnchorMeta | None:
     )
 
 
+def _fee_floor_entries(policy: ShardPolicyState) -> tuple[FeeFloorEntry, ...]:
+    return tuple(FeeFloorEntry(shard_id, floor) for shard_id, floor in policy.floor_entries())
+
+
 def _empty_anchor_branch_state() -> _AnchorBranchState:
     return _AnchorBranchState(
         height=0,
-        shard_tree=ShardTree(),
-        fee_floors={},
+        policy=ShardPolicyState.genesis(ShardTree(), {}),
         utxo_set=UTXOSet(),
         minted_supply=0,
         claimed_fruits={},

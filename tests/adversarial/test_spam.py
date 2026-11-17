@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+import tensorpow.consensus.shard_policy as shard_policy_module
 from tensorpow.mempool import MAX_FRUIT_PAYLOAD_BYTES, ROOT_SHARD_ID, Mempool
 from tensorpow.node import TensorPowConfig, TensorPowNode
 from tensorpow.pow.challenge import GENESIS_PARENT_HASH
@@ -48,7 +51,13 @@ def test_zero_fee_spam_stays_out_after_empty_fruit_flooding() -> None:
     assert mempool.fee_floor(ROOT_SHARD_ID) == floor_after_empty_fruits
 
 
-def test_node_rejects_zero_fee_spam_fruit_after_fee_floor_anchor(tmp_path: Path) -> None:
+def test_node_rejects_zero_fee_spam_fruit_after_fee_floor_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Floors are recomputed by consensus (M-2); pin the rule so the anchor can commit a
+    # high floor without first funding and confirming high-fee traffic.
+    monkeypatch.setattr(shard_policy_module, "next_fee_floor", lambda _previous, _window: 10_000)
     genesis = genesis_anchor()
     node = TensorPowNode(
         TensorPowConfig(
