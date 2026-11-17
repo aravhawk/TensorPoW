@@ -1511,3 +1511,23 @@ def _genesis_anchor() -> Anchor:
             founder_pubkey_hash=bytes.fromhex("dd" * 32),
         )
     ).anchor
+
+
+def test_peer_key_is_created_and_kept_owner_only(tmp_path: Path) -> None:
+    """L-2: the libp2p private key is never world-readable."""
+
+    import os
+    import stat
+
+    key_path = tmp_path / "keys" / "peer.key"
+    previous_umask = os.umask(0o022)
+    try:
+        identity = node_module._load_or_create_identity(key_path)
+    finally:
+        os.umask(previous_umask)
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+
+    key_path.chmod(0o644)
+    reloaded = node_module._load_or_create_identity(key_path)
+    assert reloaded.private_key_bytes == identity.private_key_bytes
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import tomllib
 from collections import OrderedDict
@@ -2012,11 +2013,19 @@ def _u256(value: int) -> bytes:
 
 
 def _load_or_create_identity(path: Path) -> NodeIdentity:
+    """Load the libp2p private key, creating it 0600 (never world-readable) if absent."""
+
     if path.is_file():
+        if path.stat().st_mode & 0o077:
+            path.chmod(0o600)
         return NodeIdentity(path.read_bytes())
     identity = NodeIdentity.generate()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(identity.private_key_bytes)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(identity.private_key_bytes)
+        handle.flush()
+        os.fsync(handle.fileno())
     return identity
 
 
