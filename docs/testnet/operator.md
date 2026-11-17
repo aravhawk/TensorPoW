@@ -25,7 +25,14 @@ The generated TOML enables networking, binds the node to the expected
 `tensorpow-testnet` genesis hash, and records the public P2P multiaddress from
 `--public-host`, not the wildcard listen address.
 RPC should remain loopback-only unless an operator places it behind explicit
-authentication and rate limiting.
+authentication and rate limiting. The RPC server refuses browser requests whose
+`Origin` is not allowlisted (so a web page cannot query or drive a local node),
+refuses `Host` values that are not IP literals, `localhost` or allowlisted
+(DNS rebinding), requires `Content-Type: application/json` for POST, and caps
+connections, WebSocket lifetime and subscriptions per client. Pass `auth_token`
+to `create_http_server` to require `Authorization: Bearer <token>` (WebSocket
+clients may use `?token=`) whenever anything other than the local user can
+reach the port.
 
 ## Testnet Genesis
 

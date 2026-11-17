@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import json
 import logging
 import socket
 from base64 import b64decode, b64encode
 from binascii import Error as BinasciiError
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
+from email.message import Message
 from hashlib import sha1
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -54,6 +58,10 @@ DEFAULT_GETUTXOS_LIMIT: Final[int] = 100
 MAX_GETUTXOS_LIMIT: Final[int] = 1_000
 RPC_REQUEST_TIMEOUT_SECONDS: Final[float] = 5.0
 MAX_RPC_CONNECTIONS: Final[int] = 64
+MAX_RPC_CONNECTIONS_PER_CLIENT: Final[int] = 8
+MAX_WEBSOCKET_CONNECTIONS: Final[int] = 32
+WEBSOCKET_MAX_LIFETIME_SECONDS: Final[float] = 600.0
+MAX_SUBSCRIPTIONS_PER_CLIENT: Final[int] = 64
 DEFAULT_EVENT_DRAIN_LIMIT: Final[int] = 100
 MAX_EVENT_DRAIN_LIMIT: Final[int] = 1_000
 MAX_SUBSCRIPTIONS: Final[int] = 1_024
@@ -68,10 +76,12 @@ WS_OPCODE_BINARY: Final[int] = 0x2
 WS_OPCODE_CLOSE: Final[int] = 0x8
 WS_OPCODE_PING: Final[int] = 0x9
 WS_OPCODE_PONG: Final[int] = 0xA
+WS_CLOSE_GOING_AWAY: Final[int] = 1001
 WS_CLOSE_PROTOCOL_ERROR: Final[int] = 1002
 
 _PARAMS_OMITTED: Final[object] = object()
 _LOGGER = logging.getLogger(__name__)
+_CURRENT_CLIENT: ContextVar[str | None] = ContextVar("tensorpow_rpc_client", default=None)
 
 
 class JsonRpcError(Exception):
@@ -109,9 +119,15 @@ class SubscriptionHub:
         max_events_per_subscription: int = MAX_EVENTS_PER_SUBSCRIPTION,
         ttl_seconds: float = SUBSCRIPTION_TTL_SECONDS,
         clock: _Clock = monotonic,
+        max_subscriptions_per_owner: int = MAX_SUBSCRIPTIONS_PER_CLIENT,
     ) -> None:
         self._lock = Lock()
         self.max_subscriptions = _require_positive_int("max_subscriptions", max_subscriptions)
+        self.max_subscriptions_per_owner = _require_positive_int(
+            "max_subscriptions_per_owner",
+            max_subscriptions_per_owner,
+        )
+        self._owners: dict[str, str] = {}
         self.max_events_per_subscription = _require_positive_int(
             "max_events_per_subscription",
             max_events_per_subscription,
@@ -122,7 +138,7 @@ class SubscriptionHub:
         self._events: dict[str, deque[JsonObject]] = {}
         self._expires_at: dict[str, float] = {}
 
-    def subscribe(self, topic: str) -> Subscription:
+    def subscribe(self, topic: str, *, owner: str | None = None) -> Subscription:
         """Create a subscription for ``topic`` and return its identifier."""
 
         topic = _require_topic(topic)
@@ -136,6 +152,15 @@ class SubscriptionHub:
                     "Subscription limit reached",
                     {"max_subscriptions": self.max_subscriptions},
                 )
+            if owner is not None:
+                owned = sum(1 for value in self._owners.values() if value == owner)
+                if owned >= self.max_subscriptions_per_owner:
+                    raise JsonRpcError(
+                        INVALID_PARAMS,
+                        "Per-client subscription limit reached",
+                        {"max_subscriptions_per_client": self.max_subscriptions_per_owner},
+                    )
+                self._owners[subscription.subscription_id] = owner
             self._subscriptions[subscription.subscription_id] = subscription
             self._events[subscription.subscription_id] = deque(
                 maxlen=self.max_events_per_subscription
@@ -209,6 +234,7 @@ class SubscriptionHub:
         self._subscriptions.pop(subscription_id, None)
         self._events.pop(subscription_id, None)
         self._expires_at.pop(subscription_id, None)
+        self._owners.pop(subscription_id, None)
 
 
 @runtime_checkable
@@ -634,7 +660,7 @@ class JsonRpcServer:
         if method == "subscribe":
             params = _params(raw_params, required=("topic",))
             topic = _string_param(params, "topic")
-            subscription = self.subscriptions.subscribe(topic)
+            subscription = self.subscriptions.subscribe(topic, owner=_CURRENT_CLIENT.get())
             return {
                 "subscription_id": subscription.subscription_id,
                 "topic": subscription.topic,
@@ -658,6 +684,12 @@ class RpcHttpServer(ThreadingHTTPServer):
         max_body_bytes: int = MAX_HTTP_BODY_BYTES,
         request_timeout_seconds: float = RPC_REQUEST_TIMEOUT_SECONDS,
         max_connections: int = MAX_RPC_CONNECTIONS,
+        max_connections_per_client: int = MAX_RPC_CONNECTIONS_PER_CLIENT,
+        max_websocket_connections: int = MAX_WEBSOCKET_CONNECTIONS,
+        websocket_max_lifetime_seconds: float = WEBSOCKET_MAX_LIFETIME_SECONDS,
+        auth_token: str | None = None,
+        allowed_origins: Iterable[str] = (),
+        allowed_hosts: Iterable[str] = (),
     ) -> None:
         super().__init__(server_address, _RpcHttpHandler)
         self.rpc_server = rpc_server
@@ -666,20 +698,48 @@ class RpcHttpServer(ThreadingHTTPServer):
             "request_timeout_seconds",
             request_timeout_seconds,
         )
+        self.max_connections_per_client = _require_positive_int(
+            "max_connections_per_client",
+            max_connections_per_client,
+        )
+        self.websocket_max_lifetime_seconds = _require_positive_float(
+            "websocket_max_lifetime_seconds",
+            websocket_max_lifetime_seconds,
+        )
+        if auth_token is not None and (not isinstance(auth_token, str) or len(auth_token) < 16):
+            raise ValueError("auth_token must be a string of at least 16 characters")
+        self.auth_token = auth_token
+        self.allowed_origins = frozenset(
+            _require_nonempty_string("origin", o) for o in allowed_origins
+        )
+        self.allowed_hosts = frozenset(
+            _require_nonempty_string("host", host).lower() for host in allowed_hosts
+        )
         self._connection_slots = BoundedSemaphore(
             _require_positive_int("max_connections", max_connections)
         )
+        self._websocket_slots = BoundedSemaphore(
+            _require_positive_int("max_websocket_connections", max_websocket_connections)
+        )
+        self._client_lock = Lock()
+        self._client_connections: dict[str, int] = {}
 
     def process_request(self, request: _SocketServerRequest, client_address: object) -> None:
-        """Start one request thread when a connection slot is available."""
+        """Start one request thread when a global and per-client slot is available."""
 
+        client = _client_key(client_address)
+        if not self._acquire_client_slot(client):
+            _close_server_request(request)
+            return
         if not self._connection_slots.acquire(blocking=False):
+            self._release_client_slot(client)
             _close_server_request(request)
             return
         try:
             super().process_request(request, client_address)
         except Exception:
             self._connection_slots.release()
+            self._release_client_slot(client)
             raise
 
     def process_request_thread(
@@ -687,12 +747,73 @@ class RpcHttpServer(ThreadingHTTPServer):
         request: _SocketServerRequest,
         client_address: object,
     ) -> None:
-        """Release the connection slot after the request thread exits."""
+        """Release the connection slots after the request thread exits."""
 
         try:
             super().process_request_thread(request, client_address)
         finally:
             self._connection_slots.release()
+            self._release_client_slot(_client_key(client_address))
+
+    def _acquire_client_slot(self, client: str) -> bool:
+        with self._client_lock:
+            current = self._client_connections.get(client, 0)
+            if current >= self.max_connections_per_client:
+                return False
+            self._client_connections[client] = current + 1
+            return True
+
+    def _release_client_slot(self, client: str) -> None:
+        with self._client_lock:
+            current = self._client_connections.get(client, 0) - 1
+            if current <= 0:
+                self._client_connections.pop(client, None)
+            else:
+                self._client_connections[client] = current
+
+    def check_request(
+        self,
+        headers: Mapping[str, str] | Message,
+        *,
+        query: str = "",
+    ) -> str | None:
+        """Return a rejection reason for a request, or ``None`` when it may proceed.
+
+        Rejects browser cross-origin requests (any ``Origin`` not explicitly allowed),
+        DNS-rebinding ``Host`` values, and, when a token is configured, requests that
+        do not present it as ``Authorization: Bearer <token>`` (WebSocket clients may
+        use the ``token`` query parameter because browsers cannot set headers there).
+        """
+
+        origin = headers.get("Origin")
+        if origin is not None and origin not in self.allowed_origins:
+            return "origin not allowed"
+        if not self._host_allowed(headers.get("Host")):
+            return "host not allowed"
+        if self.auth_token is not None:
+            presented = _bearer_token(headers.get("Authorization"))
+            if presented is None:
+                presented = _query_token(query)
+            if presented is None or not hmac.compare_digest(
+                presented.encode("utf-8"), self.auth_token.encode("utf-8")
+            ):
+                return "unauthorized"
+        return None
+
+    def _host_allowed(self, host_header: str | None) -> bool:
+        if host_header is None:
+            return False
+        host = host_header.strip().lower()
+        if host in self.allowed_hosts:
+            return True
+        name = _strip_port(host)
+        if name == "localhost":
+            return True
+        try:
+            ipaddress.ip_address(name)
+        except ValueError:
+            return name in self.allowed_hosts
+        return True
 
 
 class _RpcHttpHandler(BaseHTTPRequestHandler):
@@ -706,11 +827,30 @@ class _RpcHttpHandler(BaseHTTPRequestHandler):
         rpc_http_server = cast(RpcHttpServer, self.server)
         self.connection.settimeout(rpc_http_server.request_timeout_seconds)
 
+    def _reject_if_forbidden(self, rpc_http_server: RpcHttpServer, query: str = "") -> bool:
+        reason = rpc_http_server.check_request(self.headers, query=query)
+        if reason is None:
+            return False
+        self.close_connection = True
+        status = HTTPStatus.UNAUTHORIZED if reason == "unauthorized" else HTTPStatus.FORBIDDEN
+        self._send_json({"error": reason}, status=status)
+        return True
+
     def do_POST(self) -> None:
         """Serve JSON-RPC requests on ``/`` and ``/rpc``."""
 
         if self.path not in ("/", "/rpc"):
             self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        if self._reject_if_forbidden(cast(RpcHttpServer, self.server)):
+            return
+        content_type = self.headers.get("Content-Type", "")
+        if content_type.split(";", 1)[0].strip().lower() != "application/json":
+            self.close_connection = True
+            self._send_json(
+                {"error": "content type must be application/json"},
+                status=HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+            )
             return
 
         content_length = self.headers.get("Content-Length")
@@ -745,7 +885,11 @@ class _RpcHttpHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "incomplete request body"}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        response = rpc_http_server.rpc_server.handle_json(body)
+        token = _CURRENT_CLIENT.set(_client_key(self.client_address))
+        try:
+            response = rpc_http_server.rpc_server.handle_json(body)
+        finally:
+            _CURRENT_CLIENT.reset(token)
         if response is None:
             self.send_response(HTTPStatus.NO_CONTENT)
             self.send_header("Content-Length", "0")
@@ -758,6 +902,8 @@ class _RpcHttpHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
         rpc_http_server = cast(RpcHttpServer, self.server)
+        if self._reject_if_forbidden(rpc_http_server, parsed.query):
+            return
         if parsed.path == "/ws" or (
             parsed.path == "/rpc" and self.headers.get("Upgrade", "").lower() == "websocket"
         ):
@@ -802,8 +948,21 @@ class _RpcHttpHandler(BaseHTTPRequestHandler):
         ):
             self._send_json({"error": "invalid websocket upgrade"}, status=HTTPStatus.BAD_REQUEST)
             return
+        if not rpc_http_server._websocket_slots.acquire(blocking=False):
+            self.close_connection = True
+            self._send_json(
+                {"error": "too many websocket connections"},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        try:
+            self._serve_websocket(rpc_http_server, cast(str, key))
+        finally:
+            rpc_http_server._websocket_slots.release()
 
-        assert isinstance(key, str)
+    def _serve_websocket(self, rpc_http_server: RpcHttpServer, key: str) -> None:
+        deadline = monotonic() + rpc_http_server.websocket_max_lifetime_seconds
+        client = _client_key(self.client_address)
         self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")
@@ -814,6 +973,13 @@ class _RpcHttpHandler(BaseHTTPRequestHandler):
         fragmented_opcode: int | None = None
         fragmented_payload = bytearray()
         while True:
+            if monotonic() >= deadline:
+                _write_websocket_frame(
+                    self.connection,
+                    WS_OPCODE_CLOSE,
+                    _websocket_close_payload(WS_CLOSE_GOING_AWAY, "connection lifetime exceeded"),
+                )
+                return
             try:
                 frame = _read_websocket_frame(
                     self.connection,
@@ -886,7 +1052,11 @@ class _RpcHttpHandler(BaseHTTPRequestHandler):
                 )
                 return
 
-            response = rpc_http_server.rpc_server.handle_json(message_payload)
+            token = _CURRENT_CLIENT.set(client)
+            try:
+                response = rpc_http_server.rpc_server.handle_json(message_payload)
+            finally:
+                _CURRENT_CLIENT.reset(token)
             if response is not None:
                 _write_websocket_frame(self.connection, WS_OPCODE_TEXT, response)
 
@@ -928,8 +1098,20 @@ def create_http_server(
     max_body_bytes: int = MAX_HTTP_BODY_BYTES,
     request_timeout_seconds: float = RPC_REQUEST_TIMEOUT_SECONDS,
     max_connections: int = MAX_RPC_CONNECTIONS,
+    max_connections_per_client: int = MAX_RPC_CONNECTIONS_PER_CLIENT,
+    max_websocket_connections: int = MAX_WEBSOCKET_CONNECTIONS,
+    websocket_max_lifetime_seconds: float = WEBSOCKET_MAX_LIFETIME_SECONDS,
+    auth_token: str | None = None,
+    allowed_origins: Iterable[str] = (),
+    allowed_hosts: Iterable[str] = (),
 ) -> RpcHttpServer:
-    """Create a stdlib HTTP JSON-RPC server without starting its loop."""
+    """Create a stdlib HTTP JSON-RPC server without starting its loop.
+
+    Browser requests carrying an ``Origin`` header are refused unless the origin is in
+    ``allowed_origins``; ``Host`` must be an IP literal, ``localhost`` or in
+    ``allowed_hosts``. Set ``auth_token`` whenever the server is reachable by anything
+    other than the local user.
+    """
 
     if rpc_server is None:
         rpc_server = JsonRpcServer(backend)
@@ -939,7 +1121,44 @@ def create_http_server(
         max_body_bytes=max_body_bytes,
         request_timeout_seconds=request_timeout_seconds,
         max_connections=max_connections,
+        max_connections_per_client=max_connections_per_client,
+        max_websocket_connections=max_websocket_connections,
+        websocket_max_lifetime_seconds=websocket_max_lifetime_seconds,
+        auth_token=auth_token,
+        allowed_origins=allowed_origins,
+        allowed_hosts=allowed_hosts,
     )
+
+
+def _client_key(client_address: object) -> str:
+    if isinstance(client_address, tuple) and client_address:
+        return str(client_address[0])
+    return str(client_address)
+
+
+def _strip_port(host: str) -> str:
+    if host.startswith("["):
+        end = host.find("]")
+        return host[1:end] if end != -1 else host
+    if host.count(":") == 1:
+        return host.rsplit(":", 1)[0]
+    return host
+
+
+def _bearer_token(header: str | None) -> str | None:
+    if header is None:
+        return None
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() != "bearer" or not value.strip():
+        return None
+    return value.strip()
+
+
+def _query_token(query: str) -> str | None:
+    values = parse_qs(query).get("token")
+    if not values:
+        return None
+    return values[0]
 
 
 def openrpc_document() -> JsonObject:
