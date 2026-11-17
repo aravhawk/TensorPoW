@@ -80,11 +80,21 @@ def _run_gate(
             "user": {"login": pr_author},
             "head": {"sha": HEAD_SHA, "repo": {"full_name": head_repo}, "ref": "feature"},
         },
-        "pulls/7/reviews?per_page=100": reviews,
+        **_review_pages(reviews),
     }
     _mock_api(monkeypatch, responses)
     monkeypatch.setenv("APPROVAL_ARTIFACT_DIR", str(tmp_path / "artifacts"))
     return _main(tmp_path, monkeypatch, [])
+
+
+def _review_pages(reviews: list[dict[str, Any]]) -> dict[str, Any]:
+    pages: dict[str, Any] = {}
+    for index in range(0, max(len(reviews), 1) + 100, 100):
+        page = index // 100 + 1
+        pages[f"pulls/7/reviews?per_page=100&page={page}"] = reviews[index : index + 100]
+        if len(reviews[index : index + 100]) < 100:
+            break
+    return pages
 
 
 def _mock_api(monkeypatch: pytest.MonkeyPatch, responses: dict[str, Any]) -> None:
@@ -348,3 +358,54 @@ def test_artifact_head_repo_must_match_the_pr(
             artifact={"head_repo": "attacker/TensorPoW"},
             reviews=[_review("aravhawk", "APPROVED", HEAD_SHA, "2026-10-24T10:00:00Z")],
         )
+
+
+def test_changes_requested_after_the_first_hundred_reviews_blocks_ci(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L-7: reviews are paginated, so a late "changes requested" is not missed."""
+
+    early = [
+        _review("contributor", "COMMENTED", HEAD_SHA, f"2026-10-24T09:{minute:02d}:00Z")
+        for minute in range(59)
+    ] + [
+        _review("contributor", "COMMENTED", HEAD_SHA, f"2026-10-24T10:{minute:02d}:00Z")
+        for minute in range(40)
+    ]
+    approved = _review("aravhawk", "APPROVED", HEAD_SHA, "2026-10-24T10:50:00Z")
+    blocked = _review("aravhawk", "CHANGES_REQUESTED", HEAD_SHA, "2026-10-24T11:00:00Z")
+    reviews = [*early, approved, blocked]
+    assert len(reviews) == 101
+
+    outputs = _run_gate(tmp_path, monkeypatch, reviews=reviews)
+
+    assert outputs["should_run"] == "false"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("reviewer", "../../../orgs/x"),
+        ("reviewer", "a/b"),
+        ("reviewer", "name?x=1"),
+        ("head_sha", "a" * 39),
+        ("head_repo", "../evil"),
+        ("pr_number", "7"),
+    ],
+)
+def test_artifact_fields_are_validated_before_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    with pytest.raises(SystemExit):
+        _run_gate(
+            tmp_path,
+            monkeypatch,
+            artifact={field: value},
+            reviews=[_review("aravhawk", "APPROVED", HEAD_SHA, "2026-10-24T10:00:00Z")],
+        )
+
+
+def test_outputs_refuse_newlines(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
+    with pytest.raises(SystemExit):
+        gate.output("head_ref", "x\nshould_run=true")

@@ -16,7 +16,8 @@ permissions: {}
 jobs:
   prepare:
     name: Validate PR approval
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Only completions of the review-recording workflow triggered by a real review.
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request_review' }}
     permissions:
       actions: read
       contents: read

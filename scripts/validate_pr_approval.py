@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -17,6 +18,14 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 AUTHORIZED_PERMISSIONS = {"admin", "maintain", "write"}
+# GitHub logins: alphanumerics and single inner hyphens, at most 39 characters, plus
+# the "[bot]" suffix GitHub Apps use. Anything else from the (fork-controlled)
+# artifact is rejected before it can reach an API path.
+LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}(?:\[bot\])?$")
+REPO_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+REVIEWS_PER_PAGE = 100
+MAX_REVIEW_PAGES = 100
 
 
 @dataclass(frozen=True)
@@ -35,6 +44,8 @@ def fail(message: str) -> NoReturn:
 
 
 def output(name: str, value: str) -> None:
+    if "\n" in value or "\r" in value:
+        fail(f"refusing to write a multi-line value for output {name!r}")
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
         with Path(github_output).open("a", encoding="utf-8") as handle:
@@ -97,14 +108,43 @@ def load_approval() -> Approval | None:
         fail(f"expected one approval artifact, found {len(files)}")
 
     payload = json.loads(files[0].read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        fail("approval artifact must be a JSON object")
+    pr_number = payload.get("pr_number")
+    if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
+        fail("approval artifact pr_number must be a positive integer")
+    reviewer = str(payload.get("reviewer", ""))
+    if not LOGIN_RE.fullmatch(reviewer):
+        fail("approval artifact reviewer is not a valid GitHub login")
+    head_sha = str(payload.get("head_sha", ""))
+    if not SHA_RE.fullmatch(head_sha):
+        fail("approval artifact head_sha is not a 40-character hex commit id")
+    head_repo = str(payload.get("head_repo", ""))
+    if not REPO_RE.fullmatch(head_repo):
+        fail("approval artifact head_repo is not an owner/name repository")
     return Approval(
-        pr_number=int(payload["pr_number"]),
-        reviewer=str(payload["reviewer"]),
-        state=str(payload["state"]).lower(),
-        head_sha=str(payload["head_sha"]),
-        head_repo=str(payload["head_repo"]),
-        head_ref=str(payload["head_ref"]),
+        pr_number=pr_number,
+        reviewer=reviewer,
+        state=str(payload.get("state", "")).lower(),
+        head_sha=head_sha,
+        head_repo=head_repo,
+        head_ref=str(payload.get("head_ref", "")),
     )
+
+
+def api_list(path: str) -> list[Any]:
+    """Fetch every page of a list endpoint (the reviews API pages at 100 items)."""
+
+    items: list[Any] = []
+    separator = "&" if "?" in path else "?"
+    for page in range(1, MAX_REVIEW_PAGES + 1):
+        chunk = api_json(f"{path}{separator}per_page={REVIEWS_PER_PAGE}&page={page}")
+        if not isinstance(chunk, list):
+            fail(f"{path} returned a non-list payload")
+        items.extend(chunk)
+        if len(chunk) < REVIEWS_PER_PAGE:
+            return items
+    fail(f"{path} has more than {MAX_REVIEW_PAGES} pages")
 
 
 def validate(approval: Approval) -> None:
@@ -145,9 +185,7 @@ def validate(approval: Approval) -> None:
         output("should_run", "false")
         return
 
-    reviews = api_json(f"pulls/{approval.pr_number}/reviews?per_page=100")
-    if not isinstance(reviews, list):
-        fail("reviews API returned a non-list payload")
+    reviews = api_list(f"pulls/{approval.pr_number}/reviews")
 
     latest_state = ""
     latest_reviewer = ""
