@@ -424,7 +424,12 @@ class TensorPowNode:
                 return NodeResult.reject("malformed_tx"), None
             if not tx.inputs:
                 return NodeResult.reject("coinbase_not_relayable"), None
-            add_result = self.mempool.add_tx(tx, utxo_view=self.utxo_set)
+            add_result = self.mempool.add_tx(
+                tx,
+                utxo_view=self.utxo_set,
+                current_time_ms=_now_ms(),
+                current_height=self._mempool_lock_height(),
+            )
             if not add_result.accepted:
                 return NodeResult.reject(add_result.reason or "mempool_rejected"), add_result
             try:
@@ -1490,7 +1495,12 @@ class TensorPowNode:
             newly_claimed.append(fruit_hash)
 
         for output_index, output in enumerate(anchor.anchor_reward_outputs):
-            utxo = _utxo_from_anchor_output(anchor_hash, output_index, output)
+            utxo = _utxo_from_anchor_output(
+                anchor_hash,
+                output_index,
+                output,
+                min_lockheight=maturity_height,
+            )
             if utxo.outpoint in seen_reward_outpoints or staged.get(utxo.outpoint) is not None:
                 return "duplicate_anchor_reward_outpoint", (), 0, ()
             seen_reward_outpoints.add(utxo.outpoint)
@@ -1517,13 +1527,23 @@ class TensorPowNode:
             result = mempool.add_tx(
                 tx,
                 utxo_view=self.utxo_set,
-                current_height=self._anchor_height(),
+                current_time_ms=_now_ms(),
+                current_height=self._mempool_lock_height(),
             )
             if not result.accepted:
                 stale_tx_ids.append(tx.tx_id())
         for tx_id in stale_tx_ids:
             self.store.delete(COLUMN_MEMPOOL, tx_id)
         return mempool
+
+    def _mempool_lock_height(self) -> int:
+        """Height a pending tx is validated at: the next anchor that could cover it.
+
+        Matches fruit validation (``covering_anchor_height``), so a matured coinbase or
+        an expired lock is admitted to the mempool exactly when a fruit could include it.
+        """
+
+        return self._anchor_height() + 1
 
     def _stored_fee_floors(self) -> dict[int, int]:
         floors: dict[int, int] = {}
@@ -1824,7 +1844,13 @@ def _utxo_from_output(
     )
 
 
-def _utxo_from_anchor_output(anchor_hash: bytes, output_index: int, output: Output) -> UTXO:
+def _utxo_from_anchor_output(
+    anchor_hash: bytes,
+    output_index: int,
+    output: Output,
+    *,
+    min_lockheight: int = 0,
+) -> UTXO:
     owner_pubkey_hash = output.payload[:32] if output.template_id == TEMPLATE_PKH else bytes(32)
     return UTXO(
         outpoint=Outpoint(anchor_reward_outpoint_tx_id(anchor_hash), output_index),
@@ -1832,7 +1858,7 @@ def _utxo_from_anchor_output(anchor_hash: bytes, output_index: int, output: Outp
         template_id=output.template_id,
         owner_pubkey_hash=owner_pubkey_hash,
         locktime_ms=output.locktime_ms,
-        lockheight=output.lockheight,
+        lockheight=max(output.lockheight, min_lockheight),
         payload=output.payload,
     )
 

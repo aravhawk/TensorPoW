@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+import tensorpow.consensus.rewards as rewards_module
 from tensorpow.chain.blocks import (
     Anchor,
     FeeFloorEntry,
@@ -31,7 +34,12 @@ from tests.adversarial._helpers import (
 )
 
 
-def test_dag_order_allows_only_one_conflicting_spend(tmp_path: Path) -> None:
+def test_dag_order_allows_only_one_conflicting_spend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Anchor rewards mature like coinbases (L-8); one anchor of maturity keeps this short.
+    monkeypatch.setattr(rewards_module, "COINBASE_MATURITY_ANCHORS", 1)
     genesis = genesis_anchor()
     funding_fruit = fruit(
         (coinbase_tx(0).to_bytes(),),
@@ -52,6 +60,7 @@ def test_dag_order_allows_only_one_conflicting_spend(tmp_path: Path) -> None:
         template_id=TEMPLATE_PKH,
         owner_pubkey_hash=OWNER_PUBKEY_HASH,
         payload=OWNER_PUBKEY_HASH,
+        lockheight=2,
     )
     left_spend = signed_tx(funded, fee=100, recipient_pubkey_hash=h(900))
     right_spend = signed_tx(funded, fee=101, recipient_pubkey_hash=h(901))

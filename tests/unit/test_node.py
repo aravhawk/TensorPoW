@@ -794,14 +794,9 @@ def test_coinbase_matures_at_covering_anchor_height(
 
     funder_utxos = node.utxo_set.by_owner(funder.pubkey_hash())
     assert len(funder_utxos) == 1
-    filler_spend = funder.create_signed_transaction(
-        utxos=funder_utxos,
-        recipient_address=recipient.address,
-        amount_matoms=9_000,
-        fee_matoms=1_000,
-    )
+    assert funder_utxos[0].lockheight == coinbase_maturity_height(1)
     filler_fruit = _fruit(
-        (_coinbase_tx(102).to_bytes(), filler_spend.to_bytes()),
+        (_coinbase_tx(102).to_bytes(),),
         latest_anchor=parent_anchor,
         parent_selected=parent_fruit,
         timestamp_ms=3_000,
@@ -1531,3 +1526,86 @@ def test_peer_key_is_created_and_kept_owner_only(tmp_path: Path) -> None:
     reloaded = node_module._load_or_create_identity(key_path)
     assert reloaded.private_key_bytes == identity.private_key_bytes
     assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+
+
+def test_anchor_reward_outputs_mature_like_coinbases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L-8: anchor rewards are not spendable before COINBASE_MATURITY_ANCHORS."""
+
+    monkeypatch.setattr(rewards_module, "COINBASE_MATURITY_ANCHORS", 2)
+    node = _node(tmp_path / "node")
+    miner = Wallet.recover("91" * 32)
+    payee = Wallet.recover("92" * 32)
+    genesis = _genesis_anchor()
+    try:
+        assert node.process_anchor(genesis)
+        first = _fruit((_coinbase_tx(93).to_bytes(),), latest_anchor=genesis.block_hash())
+        assert node.process_fruit(first)
+        rewarded = _canonical_anchor(
+            node,
+            (first.block_hash(),),
+            parent_anchor=genesis.block_hash(),
+            anchor_reward_outputs=(Output(5_000, TEMPLATE_PKH, payload=miner.pubkey_hash()),),
+        )
+        assert node.process_anchor(rewarded)
+        (reward,) = node.utxo_set.by_owner(miner.pubkey_hash())
+        assert reward.lockheight == coinbase_maturity_height(1)
+
+        spend = miner.create_signed_transaction(
+            utxos=(reward,),
+            recipient_address=payee.address,
+            amount_matoms=4_000,
+            fee_matoms=1_000,
+            current_height=reward.lockheight,
+        )
+        early = _fruit(
+            (_coinbase_tx(94).to_bytes(), spend.to_bytes()),
+            latest_anchor=rewarded.block_hash(),
+            parent_selected=first.block_hash(),
+            timestamp_ms=3,
+            nonce=94,
+        )
+        assert node.process_fruit(early).reason == "script_failed"
+        assert node.process_raw_tx(spend.to_bytes())[0].reason == "script_failed"
+    finally:
+        node.close()
+
+
+def test_mempool_admission_uses_the_next_covering_height_and_wall_clock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L-8: mempool admission no longer runs with height 0 and time 0 (fail-closed)."""
+
+    monkeypatch.setattr(rewards_module, "COINBASE_MATURITY_ANCHORS", 1)
+    node = _node(tmp_path / "node")
+    owner = Wallet.recover("95" * 32)
+    payee = Wallet.recover("96" * 32)
+    genesis = _genesis_anchor()
+    coinbase = Transaction.coinbase((Output(20_000, TEMPLATE_PKH, payload=owner.pubkey_hash()),))
+    try:
+        assert node.process_anchor(genesis)
+        funding = _fruit((coinbase.to_bytes(),), latest_anchor=genesis.block_hash(), nonce=95)
+        assert node.process_fruit(funding)
+        assert node.process_anchor(
+            _canonical_anchor(node, (funding.block_hash(),), parent_anchor=genesis.block_hash())
+        )
+        (matured,) = node.utxo_set.by_owner(owner.pubkey_hash())
+        assert matured.lockheight == node._anchor_height() + 1
+
+        spend = owner.create_signed_transaction(
+            utxos=(matured,),
+            recipient_address=payee.address,
+            amount_matoms=10_000,
+            fee_matoms=1_000,
+            current_height=matured.lockheight,
+            locktime_ms=1_000,
+        )
+        result, add_result = node.process_raw_tx(spend.to_bytes())
+        assert result.accepted, result.reason
+        assert add_result is not None and add_result.accepted
+        assert node.get_tx(spend.tx_id()) is not None
+    finally:
+        node.close()
