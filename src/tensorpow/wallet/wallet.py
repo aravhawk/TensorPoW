@@ -29,10 +29,13 @@ KEYSTORE_KDF: Final[str] = "scrypt"
 KEYSTORE_SALT_BYTES: Final[int] = 16
 KEYSTORE_NONCE_BYTES: Final[int] = 12
 KEYSTORE_KEY_BYTES: Final[int] = 32
-SCRYPT_N: Final[int] = 2**14
+SCRYPT_N: Final[int] = 2**17
 SCRYPT_R: Final[int] = 8
 SCRYPT_P: Final[int] = 1
-SCRYPT_MAX_N: Final[int] = SCRYPT_N
+# Keystores written before the 2**17 default still load; anything weaker is refused.
+SCRYPT_MIN_N: Final[int] = 2**14
+# Cap on load so a hostile keystore cannot demand unbounded memory (2**18 * r=8 = 256 MiB).
+SCRYPT_MAX_N: Final[int] = 2**18
 SCRYPT_MAX_R: Final[int] = SCRYPT_R
 SCRYPT_MAX_P: Final[int] = SCRYPT_P
 
@@ -399,7 +402,8 @@ def save_keystore(
         raise FileExistsError("wallet keystore already exists")
     salt = os.urandom(KEYSTORE_SALT_BYTES)
     nonce = os.urandom(KEYSTORE_NONCE_BYTES)
-    key = _derive_keystore_key(_password_bytes(password), salt)
+    n, r, p = SCRYPT_N, SCRYPT_R, SCRYPT_P
+    key = _derive_keystore_key(_password_bytes(password), salt, n=n, r=r, p=p)
     plaintext = _json_bytes({"seed": wallet.seed_hex})
     ciphertext = AESGCM(key).encrypt(nonce, plaintext, KEYSTORE_AAD)
     document = {
@@ -409,18 +413,47 @@ def save_keystore(
         "format": KEYSTORE_FORMAT,
         "kdf": KEYSTORE_KDF,
         "kdf_params": {
-            "n": SCRYPT_N,
-            "p": SCRYPT_P,
-            "r": SCRYPT_R,
+            "n": n,
+            "p": p,
+            "r": r,
             "salt": salt.hex(),
         },
         "nonce": nonce.hex(),
         "public_key": wallet.public_key.hex(),
     }
+    _write_private_file_atomically(
+        target,
+        (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+        overwrite=overwrite,
+    )
+
+
+def _write_private_file_atomically(target: Path, data: bytes, *, overwrite: bool) -> None:
+    """Write ``data`` to a new 0600 temp file, fsync it, then move it into place.
+
+    The file is never visible with broader permissions or partially written. Without
+    ``overwrite`` the final link is a no-clobber ``os.link`` so a concurrent writer
+    cannot be silently replaced.
+    """
+
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    with suppress(OSError):
-        target.chmod(0o600)
+    tmp_path = target.with_name(f".{target.name}.{os.urandom(8).hex()}.tmp")
+    descriptor = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if overwrite:
+            os.replace(tmp_path, target)
+        else:
+            try:
+                os.link(tmp_path, target)
+            except FileExistsError as exc:
+                raise FileExistsError("wallet keystore already exists") from exc
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(tmp_path)
 
 
 def load_keystore(path: str | Path, password: str | bytes) -> Wallet:
@@ -662,6 +695,10 @@ def _require_scrypt_params(*, n: int, r: int, p: int) -> None:
     _require_positive_int("n", n)
     _require_positive_int("r", r)
     _require_positive_int("p", p)
+    if n & (n - 1):
+        raise WalletError("scrypt n must be a power of two")
+    if n < SCRYPT_MIN_N:
+        raise WalletError("scrypt n is below the minimum")
     if n > SCRYPT_MAX_N:
         raise WalletError("scrypt n exceeds maximum")
     if r > SCRYPT_MAX_R:
@@ -710,6 +747,7 @@ __all__ = [
     "SCRYPT_MAX_N",
     "SCRYPT_MAX_P",
     "SCRYPT_MAX_R",
+    "SCRYPT_MIN_N",
     "SCRYPT_N",
     "SCRYPT_P",
     "SCRYPT_R",

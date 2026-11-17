@@ -215,3 +215,52 @@ def _owned_utxo(
         lockheight=lockheight,
         payload=wallet.pubkey_hash(),
     )
+
+
+def test_keystore_uses_stronger_scrypt_and_still_loads_legacy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L-1: N >= 2**17 for new keystores; legacy 2**14 still loads; weaker is refused."""
+
+    import tensorpow.wallet.wallet as wallet_module
+
+    wallet = Wallet.create()
+    path = wallet.save(tmp_path / "new.json", "correct horse")
+    assert json.loads(path.read_text(encoding="utf-8"))["kdf_params"]["n"] >= 2**17
+
+    monkeypatch.setattr(wallet_module, "SCRYPT_N", 2**14)
+    legacy = wallet.save(tmp_path / "legacy.json", "correct horse")
+    monkeypatch.undo()
+    assert load_wallet(legacy, "correct horse").address == wallet.address
+
+    for weak_n, message in ((2**13, "below the minimum"), (3 * 2**14, "power of two")):
+        document = json.loads(legacy.read_text(encoding="utf-8"))
+        document["kdf_params"]["n"] = weak_n
+        weak = tmp_path / f"weak-{weak_n}.json"
+        weak.write_text(json.dumps(document), encoding="utf-8")
+        with pytest.raises(WalletError, match=message):
+            load_wallet(weak, "correct horse")
+
+
+def test_keystore_write_is_private_and_atomic(tmp_path: Path) -> None:
+    import os
+    import stat
+
+    previous_umask = os.umask(0o022)
+    try:
+        wallet = Wallet.create()
+        path = wallet.save(tmp_path / "wallet.json", "correct horse")
+    finally:
+        os.umask(previous_umask)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    other = Wallet.create()
+    with pytest.raises(FileExistsError):
+        other.save(path, "correct horse")
+    assert load_wallet(path, "correct horse").address == wallet.address
+
+    other.save(path, "correct horse", overwrite=True)
+    assert load_wallet(path, "correct horse").address == other.address
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["wallet.json"]
