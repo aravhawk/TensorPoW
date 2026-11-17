@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tensorpow.cli.wallet import main as wallet_main
 from tensorpow.node import TensorPowConfig, TensorPowNode
 from tensorpow.state.utxo import TEMPLATE_PKH, UTXO, Outpoint
@@ -12,7 +14,12 @@ from tensorpow.tx.transaction import Transaction
 from tensorpow.wallet import Wallet, utxos_to_json
 
 
-def test_wallet_cli_send_is_accepted_by_local_node(tmp_path: Path, capsys: object) -> None:
+def test_wallet_cli_send_is_accepted_by_local_node(
+    tmp_path: Path,
+    capsys: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TPW_TEST_PASSWORD", "pw")
     wallet = Wallet.recover("11" * 32)
     recipient = Wallet.recover("22" * 32)
     wallet_path = wallet.save(tmp_path / "wallet.json", "pw")
@@ -35,8 +42,8 @@ def test_wallet_cli_send_is_accepted_by_local_node(tmp_path: Path, capsys: objec
                     "send",
                     "--wallet",
                     str(wallet_path),
-                    "--password",
-                    "pw",
+                    "--password-env",
+                    "TPW_TEST_PASSWORD",
                     "--utxos",
                     str(utxo_path),
                     "--to",

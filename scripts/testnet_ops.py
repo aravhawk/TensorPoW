@@ -52,10 +52,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="testnet_ops")
+    parser = argparse.ArgumentParser(prog="testnet_ops", allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    genesis = subparsers.add_parser("genesis")
+    genesis = subparsers.add_parser("genesis", allow_abbrev=False)
     genesis.add_argument("--whitepaper-hash", required=True)
     genesis.add_argument("--bitcoin-block-hash", required=True)
     genesis.add_argument("--ethereum-block-hash", required=True)
@@ -63,7 +63,7 @@ def _build_parser() -> argparse.ArgumentParser:
     genesis.add_argument("--out", type=Path, required=True)
     genesis.set_defaults(handler=_cmd_genesis)
 
-    bootstrap = subparsers.add_parser("bootstrap-config")
+    bootstrap = subparsers.add_parser("bootstrap-config", allow_abbrev=False)
     bootstrap.add_argument("--data-dir", type=Path, required=True)
     bootstrap.add_argument("--genesis", type=Path, required=True)
     bootstrap.add_argument("--listen-host", default="0.0.0.0")
@@ -75,16 +75,20 @@ def _build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--out", type=Path, required=True)
     bootstrap.set_defaults(handler=_cmd_bootstrap_config)
 
-    faucet = subparsers.add_parser("faucet-tx")
+    faucet = subparsers.add_parser("faucet-tx", allow_abbrev=False)
     faucet.add_argument("--wallet", type=Path, required=True)
-    faucet.add_argument("--password", required=True)
+    faucet.add_argument(
+        "--password-env",
+        default=DEFAULT_FAUCET_PASSWORD_ENV,
+        help="environment variable holding the faucet keystore password",
+    )
     faucet.add_argument("--utxos", type=Path, required=True)
     faucet.add_argument("--to", required=True)
     faucet.add_argument("--amount", type=int, required=True)
     faucet.add_argument("--fee", type=int, default=0)
     faucet.set_defaults(handler=_cmd_faucet_tx)
 
-    serve = subparsers.add_parser("serve")
+    serve = subparsers.add_parser("serve", allow_abbrev=False)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=28380)
     serve.add_argument("--rpc-url", default=DEFAULT_TESTNET_RPC_URL)
@@ -150,7 +154,10 @@ def _cmd_bootstrap_config(args: argparse.Namespace) -> int:
 
 
 def _cmd_faucet_tx(args: argparse.Namespace) -> int:
-    wallet = load_wallet(args.wallet, args.password)
+    password = os.environ.get(args.password_env)
+    if not password:
+        raise TestnetOpsError(f"{args.password_env} must be set to unlock the faucet wallet")
+    wallet = load_wallet(args.wallet, password)
     tx = build_faucet_transaction(
         wallet=wallet,
         utxos_path=args.utxos,

@@ -1749,3 +1749,26 @@ def _unmined_first_fruit_for_anchor(latest_anchor: bytes) -> Fruit:
         if not verify_pow(header.to_pow_header(()), FRUIT_TARGET_LE, backend="cpu"):
             return Fruit(header=header, transactions=fruit.transactions)
     raise AssertionError("could not find an invalid first-fruit nonce")
+
+
+def test_faucet_tx_reads_password_from_environment_not_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-7: the faucet keystore password never appears on the command line."""
+
+    base = [
+        "faucet-tx",
+        "--wallet",
+        str(tmp_path / "faucet.json"),
+        "--utxos",
+        str(tmp_path / "utxos.json"),
+        "--to",
+        "tsc1qqqq",
+        "--amount",
+        "1",
+    ]
+    with pytest.raises(SystemExit):
+        run_testnet_ops([*base, "--password", "hunter2"])
+    monkeypatch.delenv(testnet_ops.DEFAULT_FAUCET_PASSWORD_ENV, raising=False)
+    assert run_testnet_ops(base) == 1

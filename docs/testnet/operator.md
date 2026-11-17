@@ -56,10 +56,17 @@ until external monitoring records the required duration and node count.
 The faucet helper builds ordinary signed transactions from a funded faucet
 wallet. The helper does not mint coins and does not bypass mempool validation:
 
+Secrets are never passed as command-line arguments (they would land in shell
+history and be visible in `ps`). The faucet password is read from the
+environment variable named by `--password-env`
+(default `TENSORPOW_TESTNET_FAUCET_PASSWORD`); `tensorpow-wallet` prompts with
+`getpass` or takes `--password-stdin` / `--password-env NAME`, and only prints a
+seed with `export --show-seed` after confirmation.
+
 ```bash
+read -rs TENSORPOW_TESTNET_FAUCET_PASSWORD && export TENSORPOW_TESTNET_FAUCET_PASSWORD
 /opt/anaconda3/bin/python scripts/testnet_ops.py faucet-tx \
   --wallet ~/tensorpow/data/testnet-faucet.json \
-  --password "$FAUCET_PASSWORD" \
   --utxos ~/tensorpow/data/testnet-faucet-utxos.json \
   --to "$RECIPIENT_TSC_ADDRESS" \
   --amount 100000000 \
