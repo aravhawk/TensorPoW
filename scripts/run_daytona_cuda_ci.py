@@ -38,6 +38,14 @@ DEFAULT_GPU_QUEUE_WAIT_MINUTES = 30
 SANDBOX_START_TIMEOUT_SECONDS = 300
 SANDBOX_REPO_DIR = "/tmp/tensorpow"
 SANDBOX_PYTHON = f"{SANDBOX_REPO_DIR}/.venv/bin/python"
+SANDBOX_UV_DIR = "/tmp/tensorpow-uv"
+# Pinned uv release used inside the sandbox; the tarball is checked against these
+# SHA-256 digests (from the release's .sha256 assets) before anything is executed.
+UV_VERSION = "0.13.6"
+UV_RELEASE_SHA256 = {
+    "x86_64-unknown-linux-gnu": "f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645",
+    "aarch64-unknown-linux-gnu": "229e194255c7958d86d56e8790d969a6f74736592133f0dfd0076f754c642c1d",
+}
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 # "gpu" as its own word, so the "daytona-gpu" snapshot name alone doesn't count.
@@ -495,12 +503,7 @@ def main() -> int:
         )
         run(
             sandbox,
-            "if ! command -v uv >/dev/null 2>&1; then "
-            "curl -LsSf https://astral.sh/uv/install.sh | sh; "
-            "fi; "
-            'UV_BIN="$(command -v uv || printf %s "$HOME/.local/bin/uv")"; '
-            '"$UV_BIN" venv --python 3.12 .venv; '
-            f'"$UV_BIN" pip install --python {shlex.quote(SANDBOX_PYTHON)} -e ".[dev]"',
+            sandbox_install_command(),
             cwd=SANDBOX_REPO_DIR,
             timeout=timeout,
         )
@@ -522,6 +525,33 @@ def main() -> int:
                 sandbox.delete(timeout=120, wait=True)
             except Exception as exc:
                 print(f"Failed to delete Daytona sandbox {sandbox.id}: {exc}", file=sys.stderr)
+
+
+def sandbox_install_command() -> str:
+    """Return the sandbox setup command: verified pinned uv, then a locked install.
+
+    No ``curl | sh``: the uv release tarball is downloaded, checked against a pinned
+    SHA-256 and only then unpacked, and dependencies come from uv.lock with its hashes
+    (``uv sync --locked``) instead of a fresh resolution.
+    """
+
+    x86 = UV_RELEASE_SHA256["x86_64-unknown-linux-gnu"]
+    arm = UV_RELEASE_SHA256["aarch64-unknown-linux-gnu"]
+    release = f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}"
+    return (
+        "set -eu; "
+        'case "$(uname -m)" in '
+        f"x86_64) triple=x86_64-unknown-linux-gnu; digest={x86} ;; "
+        f"aarch64|arm64) triple=aarch64-unknown-linux-gnu; digest={arm} ;; "
+        '*) echo "unsupported sandbox architecture" >&2; exit 1 ;; '
+        "esac; "
+        f"mkdir -p {SANDBOX_UV_DIR}; "
+        f'curl -fsSL -o {SANDBOX_UV_DIR}/uv.tar.gz "{release}/uv-$triple.tar.gz"; '
+        f'printf "%s  %s\\n" "$digest" {SANDBOX_UV_DIR}/uv.tar.gz | sha256sum -c -; '
+        f"tar -xzf {SANDBOX_UV_DIR}/uv.tar.gz -C {SANDBOX_UV_DIR}; "
+        f'UV_BIN="{SANDBOX_UV_DIR}/uv-$triple/uv"; '
+        '"$UV_BIN" sync --locked --all-extras --python 3.12'
+    )
 
 
 def _interrupt_on_sigterm(signum: int, frame: FrameType | None) -> None:
