@@ -396,8 +396,8 @@ class Mempool:
             return _SpendAssessment(0, 0, False, "tx_lock_unmatured")
 
         seen_outpoints: set[Outpoint] = set()
-        input_sum = 0
-        for input_index, input_ in enumerate(tx.inputs):
+        spent: list[UTXO] = []
+        for input_ in tx.inputs:
             outpoint = input_.previous_outpoint
             if outpoint in seen_outpoints:
                 return _SpendAssessment(0, 0, False, "duplicate_input")
@@ -409,17 +409,20 @@ class Mempool:
             utxo = utxo_view.get(outpoint)
             if utxo is None:
                 return _SpendAssessment(0, 0, False, "missing_input")
+            spent.append(utxo)
 
+        spent_amounts = tuple(utxo.amount_matoms for utxo in spent)
+        for input_index, (input_, utxo) in enumerate(zip(tx.inputs, spent, strict=True)):
             if not verify_utxo_spend(
                 utxo,
                 input_.witness,
-                tx.sighash(input_index),
+                tx.sighash(input_index, spent_amounts),
                 sig_type=tx.sig_type,
                 current_time_ms=current_time_ms,
                 current_height=current_height,
             ):
                 return _SpendAssessment(0, 0, False, "script_failed")
-            input_sum += utxo.amount_matoms
+        input_sum = sum(spent_amounts)
 
         output_sum = sum(output.amount_matoms for output in tx.outputs)
         fee_matoms = input_sum - output_sum

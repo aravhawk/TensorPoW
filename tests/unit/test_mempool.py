@@ -245,7 +245,7 @@ def _signed_tx(
         inputs=(unsigned_input,),
         outputs=(output,),
     )
-    signature = sign(unsigned_tx.sighash(0), PRIV1)
+    signature = sign(unsigned_tx.sighash(0, (utxo.amount_matoms,)), PRIV1)
     if corrupt_witness:
         signature = bytes([signature[0] ^ 1]) + signature[1:]
     return Transaction(

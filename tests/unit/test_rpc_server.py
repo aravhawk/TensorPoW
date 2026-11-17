@@ -503,7 +503,7 @@ def _signed_tx(utxo: UTXO, *, fee: int) -> Transaction:
         inputs=(unsigned_input,),
         outputs=(output,),
     )
-    signature = sign(unsigned_tx.sighash(0), PRIV1)
+    signature = sign(unsigned_tx.sighash(0, (utxo.amount_matoms,)), PRIV1)
     return Transaction(
         version=unsigned_tx.version,
         sig_type=unsigned_tx.sig_type,

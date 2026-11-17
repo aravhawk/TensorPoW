@@ -80,35 +80,38 @@ def test_wallet_builds_signed_pkh_transaction_and_change() -> None:
     assert tx.outputs[0].payload == recipient.pubkey_hash()
     assert tx.outputs[1].payload == wallet.pubkey_hash()
     assert len(tx.inputs[0].witness) == 96
-    assert verify_utxo_spend(utxos[0], tx.inputs[0].witness, tx.sighash(0), sig_type=tx.sig_type)
+    assert verify_utxo_spend(
+        utxos[0],
+        tx.inputs[0].witness,
+        tx.sighash(0, (utxos[0].amount_matoms,)),
+        sig_type=tx.sig_type,
+    )
     assert Transaction.from_bytes(tx.to_bytes()) == tx
 
 
 def test_wallet_signing_reuses_each_input_sighash(monkeypatch: pytest.MonkeyPatch) -> None:
     wallet = Wallet.recover("11" * 32)
     recipient = Wallet.recover("22" * 32)
+    spent = (_owned_utxo(wallet, 40, 0), _owned_utxo(wallet, 40, 1))
     unsigned = Transaction(
         version=FORMAT_EPOCH,
         sig_type=SIG_TYPE_ED25519,
         locktime_ms=0,
         lockheight=0,
-        inputs=(
-            Input(_owned_utxo(wallet, 40, 0).outpoint),
-            Input(_owned_utxo(wallet, 40, 1).outpoint),
-        ),
+        inputs=(Input(spent[0].outpoint), Input(spent[1].outpoint)),
         outputs=(Output(50, TEMPLATE_PKH, payload=recipient.pubkey_hash()),),
     )
     calls = 0
     original_sighash = Transaction.sighash
 
-    def counting_sighash(tx: Transaction, input_index: int) -> bytes:
+    def counting_sighash(tx: Transaction, input_index: int, amounts: tuple[int, ...]) -> bytes:
         nonlocal calls
         calls += 1
-        return original_sighash(tx, input_index)
+        return original_sighash(tx, input_index, amounts)
 
     monkeypatch.setattr(Transaction, "sighash", counting_sighash)
 
-    wallet.sign_transaction(unsigned)
+    wallet.sign_transaction(unsigned, spent)
 
     assert calls == len(unsigned.inputs)
 
@@ -264,3 +267,28 @@ def test_keystore_write_is_private_and_atomic(tmp_path: Path) -> None:
     assert load_wallet(path, "correct horse").address == other.address
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert sorted(entry.name for entry in tmp_path.iterdir()) == ["wallet.json"]
+
+
+def test_wallet_signature_is_invalid_when_given_a_lying_utxo_amount() -> None:
+    """L-3: an inflated UTXO amount cannot trick the wallet into a valid overpaying spend."""
+
+    from dataclasses import replace
+
+    wallet = Wallet.recover("11" * 32)
+    recipient = Wallet.recover("22" * 32)
+    real = _owned_utxo(wallet, 100, 0)
+    lying = replace(real, amount_matoms=10_000)
+    tx = wallet.create_signed_transaction(
+        utxos=(lying,),
+        recipient_address=recipient.address,
+        amount_matoms=9_000,
+        fee_matoms=1,
+    )
+    assert verify_utxo_spend(
+        lying, tx.inputs[0].witness, tx.sighash(0, (lying.amount_matoms,)), sig_type=tx.sig_type
+    )
+    assert not verify_utxo_spend(
+        real, tx.inputs[0].witness, tx.sighash(0, (real.amount_matoms,)), sig_type=tx.sig_type
+    )
+    with pytest.raises(WalletError, match="match the transaction inputs"):
+        wallet.sign_transaction(tx.without_witnesses(), (_owned_utxo(wallet, 100, 1),))

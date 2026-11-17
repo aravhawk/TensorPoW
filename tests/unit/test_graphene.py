@@ -156,7 +156,7 @@ def _relay_tx(seed: int) -> Transaction:
         inputs=(Input(utxo.outpoint),),
         outputs=(output,),
     )
-    signature = sign(unsigned.sighash(0), PRIV1)
+    signature = sign(unsigned.sighash(0, (utxo.amount_matoms,)), PRIV1)
     return Transaction(
         version=unsigned.version,
         sig_type=unsigned.sig_type,

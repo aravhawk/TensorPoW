@@ -267,23 +267,37 @@ class Wallet:
                 inputs=tuple(Input(utxo.outpoint) for utxo in selected),
                 outputs=tuple(outputs),
             )
-            return self.sign_transaction(unsigned)
+            return self.sign_transaction(unsigned, selected)
         except WalletError:
             raise
         except ValueError as exc:
             raise WalletError(f"failed to build wallet transaction: {exc}") from exc
 
-    def sign_transaction(self, unsigned_tx: Transaction) -> Transaction:
-        """Return ``unsigned_tx`` with every input signed by this wallet."""
+    def sign_transaction(
+        self,
+        unsigned_tx: Transaction,
+        spent_utxos: Iterable[UTXO],
+    ) -> Transaction:
+        """Return ``unsigned_tx`` with every input signed by this wallet.
+
+        ``spent_utxos`` are the outputs spent by each input, in input order; their
+        amounts are committed by the signature hash.
+        """
 
         if not isinstance(unsigned_tx, Transaction):
             raise TypeError("unsigned_tx must be Transaction")
         if not unsigned_tx.inputs:
             raise WalletError("transaction has no inputs to sign")
+        spent = _require_utxos(spent_utxos)
+        if tuple(utxo.outpoint for utxo in spent) != tuple(
+            input_.previous_outpoint for input_ in unsigned_tx.inputs
+        ):
+            raise WalletError("spent_utxos must match the transaction inputs in order")
+        spent_amounts = tuple(utxo.amount_matoms for utxo in spent)
         base_tx = unsigned_tx.without_witnesses()
         signed_inputs = []
         for index, input_ in enumerate(base_tx.inputs):
-            sighash = base_tx.sighash(index)
+            sighash = base_tx.sighash(index, spent_amounts)
             signature = sign(sighash, self.private_key)
             witness = signature + self.public_key
             if not verify_template(

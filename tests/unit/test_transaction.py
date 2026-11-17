@@ -25,7 +25,7 @@ TX_BYTES_HEX = (
     "090909090909090909090909090909090909090909"
 )
 TX_ID_HEX = "3082fbd5faaf071a6924ea9e78dd1bd75abf46af59ca5c3c7dbcbd1fbab261ed"
-SIGHASH_HEX = "1f40bf3886422f28971cb9bb6cfc4b74b817880bc6e67e868360faa80ad9e1a0"
+SIGHASH_HEX = "46ba49203f41cb40a789f0661e5e748f4f273c92e08d340fdd53ee12feb3ffbd"
 INPUT_BYTES_HEX = (
     "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f07000000ffffffff02000102"
 )
@@ -76,7 +76,7 @@ def test_transaction_input_and_output_match_reference_vectors() -> None:
     assert tx.to_bytes().hex() == TX_BYTES_HEX
     assert Transaction.from_bytes(tx.to_bytes()) == tx
     assert tx.tx_id().hex() == TX_ID_HEX
-    assert tx.sighash(0).hex() == SIGHASH_HEX
+    assert tx.sighash(0, (1_000,)).hex() == SIGHASH_HEX
 
 
 def test_coinbase_round_trip_allows_zero_inputs_but_requires_outputs() -> None:
@@ -100,10 +100,10 @@ def test_sighash_uses_empty_witnesses_and_checks_index() -> None:
     )
 
     assert changed_witness.tx_id() != tx.tx_id()
-    assert changed_witness.sighash(0) == tx.sighash(0)
+    assert changed_witness.sighash(0, (5,)) == tx.sighash(0, (5,))
     assert tx.without_witnesses().inputs[0].witness == b""
     with pytest.raises(IndexError):
-        tx.sighash(1)
+        tx.sighash(1, (5,))
 
 
 def test_sighash_input_index_is_uint32_le() -> None:
@@ -123,14 +123,34 @@ def test_sighash_input_index_is_uint32_le() -> None:
     )
 
     empty_witness_bytes = tx.without_witnesses().to_bytes()
-    assert tx.sighash(1) == domain_hash(
+    amounts = (7, 9)
+    amount_bytes = b"".join(amount.to_bytes(8, "little") for amount in amounts)
+    assert tx.sighash(1, amounts) == domain_hash(
         DOMAIN_TX_SIGHASH,
-        empty_witness_bytes + (1).to_bytes(4, "little"),
+        empty_witness_bytes + (1).to_bytes(4, "little") + amount_bytes,
     )
-    assert tx.sighash(1) != domain_hash(
+    assert tx.sighash(1, amounts) != domain_hash(
         DOMAIN_TX_SIGHASH,
-        empty_witness_bytes + (1).to_bytes(2, "little"),
+        empty_witness_bytes + (1).to_bytes(2, "little") + amount_bytes,
     )
+
+
+def test_sighash_commits_every_spent_amount() -> None:
+    """L-3: a signer handed a wrong input amount produces a different signature hash."""
+
+    tx = Transaction(
+        version=FORMAT_EPOCH,
+        sig_type=0,
+        locktime_ms=0,
+        lockheight=0,
+        inputs=(_input(), Input(previous_outpoint=Outpoint(bytes([1]) * 32, 1))),
+        outputs=(_output(),),
+    )
+    honest = tx.sighash(0, (1_000, 2_000))
+    assert tx.sighash(0, (1_000, 2_001)) != honest
+    assert tx.sighash(0, (999, 2_000)) != honest
+    with pytest.raises(ValueError, match="one amount per input"):
+        tx.sighash(0, (1_000,))
 
 
 def test_transaction_rejects_malformed_truncated_and_noncanonical_bytes() -> None:

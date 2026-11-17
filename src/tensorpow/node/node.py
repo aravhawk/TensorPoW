@@ -1768,8 +1768,8 @@ def _apply_spend_tx(
     except (TypeError, ValueError, ScriptError):
         return "tx_lock_unmatured", 0, 0
     seen: set[Outpoint] = set()
-    input_sum = 0
-    for input_index, input_ in enumerate(tx.inputs):
+    spent: list[UTXO] = []
+    for input_ in tx.inputs:
         outpoint = input_.previous_outpoint
         if outpoint in seen:
             return "duplicate_input", 0, 0
@@ -1777,16 +1777,19 @@ def _apply_spend_tx(
         utxo = utxo_set.get(outpoint)
         if utxo is None:
             return "missing_input", 0, 0
+        spent.append(utxo)
+    spent_amounts = tuple(utxo.amount_matoms for utxo in spent)
+    for input_index, (input_, utxo) in enumerate(zip(tx.inputs, spent, strict=True)):
         if not verify_utxo_spend(
             utxo,
             input_.witness,
-            tx.sighash(input_index),
+            tx.sighash(input_index, spent_amounts),
             sig_type=tx.sig_type,
             current_time_ms=current_time_ms,
             current_height=current_height,
         ):
             return "script_failed", 0, 0
-        input_sum += utxo.amount_matoms
+    input_sum = sum(spent_amounts)
     output_sum = sum(output.amount_matoms for output in tx.outputs)
     if output_sum > input_sum:
         return "negative_fee", 0, 0

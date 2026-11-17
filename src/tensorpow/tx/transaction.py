@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -236,13 +237,30 @@ class Transaction:
 
         return domain_hash(DOMAIN_TX_ID, self.to_bytes())
 
-    def sighash(self, input_index: int) -> bytes:
-        """Return the section-10 signature hash for one input."""
+    def sighash(self, input_index: int, spent_amounts: Sequence[int]) -> bytes:
+        """Return the section-10 signature hash for one input.
+
+        ``spent_amounts`` are the amounts of the outputs spent by every input, in input
+        order. Committing them means a signer that was given wrong UTXO amounts (for
+        example by a lying UTXO file or RPC) produces an invalid signature instead of
+        silently overpaying the fee.
+        """
 
         _require_u32("input_index", input_index)
         if input_index >= len(self.inputs):
             raise IndexError("input_index outside transaction inputs")
-        payload = self._to_bytes(empty_witnesses=True) + _u32(input_index)
+        amounts = tuple(spent_amounts)
+        if len(amounts) != len(self.inputs):
+            raise ValueError("spent_amounts must have one amount per input")
+        for amount in amounts:
+            _require_u64("spent_amount", amount)
+        payload = b"".join(
+            (
+                self._to_bytes(empty_witnesses=True),
+                _u32(input_index),
+                *(_u64(amount) for amount in amounts),
+            )
+        )
         return domain_hash(DOMAIN_TX_SIGHASH, payload)
 
     def without_witnesses(self) -> Transaction:

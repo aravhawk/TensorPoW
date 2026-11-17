@@ -602,11 +602,16 @@ tx_id = BLAKE3(DOMAIN_TX_ID || canonical_tx_bytes)
 Signature hash:
 
 ```text
-sighash = BLAKE3(DOMAIN_TX_SIGHASH || canonical_tx_bytes_with_empty_witnesses || input_index_u32_le)
+sighash = BLAKE3(DOMAIN_TX_SIGHASH || canonical_tx_bytes_with_empty_witnesses
+                 || input_index_u32_le || spent_amount_u64_le[0] || ... || spent_amount_u64_le[n-1])
 ```
 
 `input_index_u32_le` is exactly `U32_BYTES` little-endian bytes. Implementations MUST NOT encode the
 signature-hash input index as `uint16`, even though `input_count` is a `uint16`.
+`spent_amount_u64_le[i]` is the `amount_matoms` of the output spent by input `i`, for every
+input in input order. Committing the spent amounts means a signer that was given a wrong UTXO
+amount (for example by an unauthenticated UTXO file or RPC response) produces a signature that
+is invalid on chain instead of silently overpaying the fee.
 
 Transaction byte layout:
 

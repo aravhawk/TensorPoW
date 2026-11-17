@@ -92,7 +92,7 @@ def signed_tx(
         inputs=(Input(spent.outpoint),),
         outputs=(output,),
     )
-    witness = sign(unsigned.sighash(0), PRIVATE_KEY) + PUBLIC_KEY
+    witness = sign(unsigned.sighash(0, (spent.amount_matoms,)), PRIVATE_KEY) + PUBLIC_KEY
     return Transaction(
         version=unsigned.version,
         sig_type=unsigned.sig_type,
