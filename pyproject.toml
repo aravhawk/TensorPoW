@@ -71,3 +71,8 @@ strict = true
 warn_unreachable = true
 warn_unused_configs = true
 pretty = true
+
+[tool.uv]
+# GHSA-vvf4-9x63-8xvv: dnspython < 2.9.2 allows excessive memory/CPU use (DoS).
+# Transitive via libp2p -> multiaddr; keep the resolved version on the fixed release.
+constraint-dependencies = ["dnspython>=2.9.2"]
